@@ -218,7 +218,7 @@ const buildReconstatareEmail = (dosar, recon, extraText) => {
   const piese = (recon?.piese||[]).filter(p => p.piesa?.trim());
   const subject = `Solicitare reconstatare – Dosar ${dosar.nrDosar} – ${dosar.masina?.nrInmatriculare||""}`;
   let body = `Bună ziua,\n\n`;
-  body += `Vă transmitem solicitare de reconstatare pentru dosarul nr. ${dosar.nrDosar}, vehicul ${dosar.masina?.marca||""} ${dosar.masina?.model||""}, nr. înmatriculare ${dosar.masina?.nrInmatriculare||""}.\n`;
+  body += `Vă transmitem solicitarea de reconstatare pentru dosar daună nr. ${dosar.nrDosar}, vehicul ${dosar.masina?.marca||""} ${dosar.masina?.model||""}, nr. înmatriculare ${dosar.masina?.nrInmatriculare||""}.\n`;
   if (piese.length > 0) {
     body += `\nElemente solicitate:\n`;
     piese.forEach((p,i) => {
@@ -241,11 +241,11 @@ const buildDespagubireEmail = (dosar, extraText) => {
 };
 
 // ─── SEND EMAIL VIA OWN BACKEND ─────────────────────────────────
-const sendEmail = async ({ to, subject, body, fromName }) => {
+const sendEmail = async ({ to, subject, body, fromName, attachments }) => {
   const r = await fetch("/api/send-email", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ to, subject, body, fromName }),
+    body: JSON.stringify({ to, subject, body, fromName, attachments: attachments || [] }),
   });
   const data = await r.json().catch(()=>({}));
   if (!r.ok) {
@@ -253,6 +253,10 @@ const sendEmail = async ({ to, subject, body, fromName }) => {
   }
   return data;
 };
+
+// Total size of files (in bytes)
+const totalSize = (files) => (files||[]).reduce((s,f)=>s+(f.size||0), 0);
+const SIZE_LIMIT = 23 * 1024 * 1024; // 23 MB safe margin for Gmail's 25 MB limit
 
 // ─── DB ─────────────────────────────────────────────────────────
 const db = {
@@ -1391,50 +1395,167 @@ function IR({ l, v }) {
   );
 }
 
-// ─── PHOTO GALLERY ──────────────────────────────────────────────
+// ─── PHOTO GALLERY (cu zoom & pan) ─────────────────────────────
 function PhotoGallery({ photos, index, onClose, onIndex }) {
-  const prev = () => onIndex(index === 0 ? photos.length - 1 : index - 1);
-  const next = () => onIndex(index === photos.length - 1 ? 0 : index + 1);
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const imgRef = useRef(null);
+  const containerRef = useRef(null);
+
+  // Touch state
+  const lastTouchDist = useRef(null);
+  const lastPanStart = useRef(null);
+  const swipeStart = useRef(null);
+
+  const prev = () => { resetZoom(); onIndex(index === 0 ? photos.length - 1 : index - 1); };
+  const next = () => { resetZoom(); onIndex(index === photos.length - 1 ? 0 : index + 1); };
+  const resetZoom = () => { setZoom(1); setPan({ x: 0, y: 0 }); };
+
+  // Reset zoom când se schimbă poza
+  useEffect(() => { resetZoom(); }, [index]);
 
   useEffect(() => {
     const h = ev => {
       if (ev.key === "ArrowLeft") prev();
       else if (ev.key === "ArrowRight") next();
       else if (ev.key === "Escape") onClose();
+      else if (ev.key === "0") resetZoom();
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
     // eslint-disable-next-line
   }, [index, photos.length]);
 
-  const touchStart = useRef(null);
-  const onTouchStart = e => { touchStart.current = e.touches[0].clientX; };
-  const onTouchEnd = e => {
-    if (touchStart.current === null) return;
-    const diff = e.changedTouches[0].clientX - touchStart.current;
-    if (Math.abs(diff) > 50) { diff > 0 ? prev() : next(); }
-    touchStart.current = null;
+  // Scroll wheel zoom (laptop/desktop)
+  const onWheel = (e) => {
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? -0.2 : 0.2;
+    setZoom(z => Math.max(1, Math.min(5, z + delta)));
+    if (zoom + delta <= 1) setPan({ x: 0, y: 0 });
+  };
+
+  // Double click/tap to toggle zoom
+  const onDoubleClick = () => {
+    if (zoom > 1) {
+      resetZoom();
+    } else {
+      setZoom(2.5);
+    }
+  };
+
+  // Pinch-to-zoom (mobile) + pan
+  const getTouchDist = (touches) => {
+    const dx = touches[0].clientX - touches[1].clientX;
+    const dy = touches[0].clientY - touches[1].clientY;
+    return Math.sqrt(dx*dx + dy*dy);
+  };
+
+  const onTouchStart = (e) => {
+    if (e.touches.length === 2) {
+      // Start pinch
+      lastTouchDist.current = getTouchDist(e.touches);
+      swipeStart.current = null;
+    } else if (e.touches.length === 1) {
+      if (zoom > 1) {
+        // Start pan
+        lastPanStart.current = { x: e.touches[0].clientX - pan.x, y: e.touches[0].clientY - pan.y };
+      } else {
+        // Start swipe
+        swipeStart.current = e.touches[0].clientX;
+      }
+    }
+  };
+
+  const onTouchMove = (e) => {
+    if (e.touches.length === 2 && lastTouchDist.current !== null) {
+      // Pinch zoom
+      e.preventDefault();
+      const newDist = getTouchDist(e.touches);
+      const scale = newDist / lastTouchDist.current;
+      setZoom(z => Math.max(1, Math.min(5, z * scale)));
+      lastTouchDist.current = newDist;
+    } else if (e.touches.length === 1 && zoom > 1 && lastPanStart.current) {
+      // Pan
+      e.preventDefault();
+      setPan({
+        x: e.touches[0].clientX - lastPanStart.current.x,
+        y: e.touches[0].clientY - lastPanStart.current.y,
+      });
+    }
+  };
+
+  const onTouchEnd = (e) => {
+    if (e.touches.length === 0) {
+      // Swipe between photos (only if not zoomed)
+      if (swipeStart.current !== null && zoom <= 1) {
+        const diff = e.changedTouches[0].clientX - swipeStart.current;
+        if (Math.abs(diff) > 50) { diff > 0 ? prev() : next(); }
+      }
+      lastTouchDist.current = null;
+      lastPanStart.current = null;
+      swipeStart.current = null;
+      if (zoom <= 1.05) { setZoom(1); setPan({ x: 0, y: 0 }); }
+    }
   };
 
   const photo = photos[index];
 
   return (
-    <div className="fixed inset-0 z-[100] bg-black/95 flex flex-col"
-      onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
-      <div className="flex justify-between items-center p-4 text-white">
+    <div ref={containerRef} className="fixed inset-0 z-[100] bg-black/95 flex flex-col"
+      style={{ touchAction: 'none' }}>
+      <div className="flex justify-between items-center p-4 text-white z-20 relative">
         <div className="text-sm">{index + 1} / {photos.length}</div>
-        <button onClick={onClose} className="p-2 rounded-full bg-white/10"><X size={18}/></button>
+        <div className="flex items-center gap-2">
+          {zoom > 1 && (
+            <button onClick={resetZoom} className="px-3 py-1 rounded-full bg-white/10 text-xs">
+              {zoom.toFixed(1)}× • Reset
+            </button>
+          )}
+          <button onClick={onClose} className="p-2 rounded-full bg-white/10"><X size={18}/></button>
+        </div>
       </div>
-      <div className="flex-1 flex items-center justify-center relative px-2">
-        <button onClick={prev} className="absolute left-2 p-3 rounded-full bg-white/10 text-white hover:bg-white/20 z-10">
-          <ChevronLeft size={22}/>
-        </button>
-        <img src={photo.url||photo.data} alt={photo.name} className="max-w-full max-h-full object-contain select-none"/>
-        <button onClick={next} className="absolute right-2 p-3 rounded-full bg-white/10 text-white hover:bg-white/20 z-10">
-          <ChevronRight size={22}/>
-        </button>
+
+      <div
+        className="flex-1 flex items-center justify-center relative px-2 overflow-hidden"
+        onWheel={onWheel}
+        onTouchStart={onTouchStart}
+        onTouchMove={onTouchMove}
+        onTouchEnd={onTouchEnd}
+      >
+        {zoom <= 1 && (
+          <button onClick={prev} className="absolute left-2 p-3 rounded-full bg-white/10 text-white hover:bg-white/20 z-10">
+            <ChevronLeft size={22}/>
+          </button>
+        )}
+
+        <img
+          ref={imgRef}
+          src={photo.url||photo.data}
+          alt={photo.name}
+          onDoubleClick={onDoubleClick}
+          className="max-w-full max-h-full object-contain select-none"
+          style={{
+            transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+            transformOrigin: 'center center',
+            transition: lastTouchDist.current || lastPanStart.current ? 'none' : 'transform 0.15s ease-out',
+            cursor: zoom > 1 ? 'grab' : 'zoom-in',
+          }}
+          draggable={false}
+        />
+
+        {zoom <= 1 && (
+          <button onClick={next} className="absolute right-2 p-3 rounded-full bg-white/10 text-white hover:bg-white/20 z-10">
+            <ChevronRight size={22}/>
+          </button>
+        )}
       </div>
-      <div className="p-4 text-center text-white/70 text-xs">{photo.name}</div>
+
+      <div className="p-3 text-center text-white/70 text-xs">
+        <div className="truncate">{photo.name}</div>
+        <div className="text-white/40 mt-1">
+          {zoom > 1 ? "Trage pentru a muta · Dublu-click pentru reset" : "Pinch/scroll pentru zoom · Dublu-click pentru zoom rapid"}
+        </div>
+      </div>
     </div>
   );
 }
@@ -1560,15 +1681,30 @@ function ReconstatareWorkflow({ dosar, recon, settings, onSave, onCancel }) {
 
   const sendNow = async () => {
     if (!recipient) { setEmailStatus("error"); setEmailErr(`Adresa de reconstatare nu este salvată pentru ${companie||"acest asigurator"}.`); return; }
+
+    // Check size
+    const allFiles = [...(e.poze||[]), ...(e.documente||[])];
+    const size = totalSize(allFiles);
+    if (size > SIZE_LIMIT) {
+      setEmailStatus("error");
+      setEmailErr(`Atașamentele depășesc limita: ${(size/(1024*1024)).toFixed(1)} MB (max 23 MB). Reduce numărul de poze sau trimite separat.`);
+      return;
+    }
+
     setEmailStatus("sending"); setEmailErr("");
     try {
-      await sendEmail({
+      const attachments = allFiles.map(f => ({ url: f.url, name: f.name, type: f.type }));
+      const result = await sendEmail({
         to: recipient, subject, body,
         fromName: settings.fromName || COMPANY.agent,
+        attachments,
       });
+      const updated = { ...e, emailSent: true, emailSentAt: new Date().toISOString() };
+      setE(updated);
       setEmailStatus("sent");
-      setE(p => ({ ...p, emailSent: true, emailSentAt: new Date().toISOString() }));
-      setTimeout(()=>setEmailStatus(null), 3000);
+      console.log(`Email trimis cu ${result.attachmentsCount}/${result.attachmentsRequested} atașamente`);
+      // Auto-save reconstatarea cu starea de email trimis
+      await onSave(updated);
     } catch(err) { setEmailStatus("error"); setEmailErr(err.message); }
   };
 
@@ -1801,14 +1937,26 @@ function DespagubireTab({ dosar, settings, onUpdate }) {
 
   const send = async () => {
     if (!recipient) { setStatus("error"); setErr(`Adresa lipsește pentru ${companie}.`); return; }
+
+    // Check size
+    const size = totalSize(docs);
+    if (size > SIZE_LIMIT) {
+      setStatus("error");
+      setErr(`Atașamentele depășesc limita: ${(size/(1024*1024)).toFixed(1)} MB (max 23 MB).`);
+      return;
+    }
+
     setStatus("sending"); setErr("");
     try {
-      await sendEmail({
+      const attachments = docs.map(d => ({ url: d.url, name: d.name, type: d.type }));
+      const result = await sendEmail({
         to: recipient, subject, body,
         fromName: settings.fromName || COMPANY.agent,
+        attachments,
       });
       setStatus("sent");
       await onUpdate({ ...dosar, despagubire: { ...dosar.despagubire, emailExtra: extra, emailSent: true, emailSentAt: new Date().toISOString() }, status: "finalizat" });
+      console.log(`Email trimis cu ${result.attachmentsCount}/${result.attachmentsRequested} atașamente`);
       setTimeout(()=>setStatus(null), 3000);
     } catch(e) { setStatus("error"); setErr(e.message); }
   };
