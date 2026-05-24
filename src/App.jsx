@@ -4,7 +4,7 @@ import {
   Mail, Camera, Trash2, Check, Clock, Edit, ArrowLeft,
   Send, Calendar, User, Building, X, Download,
   Settings, AlertCircle, ChevronDown, WifiOff, Paperclip,
-  Lock, BarChart3, ListChecks, LogOut, Receipt, Package
+  Lock, BarChart3, ListChecks, LogOut, Package, Archive
 } from "lucide-react";
 import { supabase } from "./supabase.js";
 import JSZip from "jszip";
@@ -28,6 +28,7 @@ const STATUS = {
   reconstatare:   { label:"Reconstatare",   bg:"bg-amber-100",  text:"text-amber-700",  dot:"bg-amber-500" },
   in_lucru:       { label:"În lucru",       bg:"bg-indigo-100", text:"text-indigo-700", dot:"bg-indigo-500" },
   finalizat:      { label:"Finalizat",      bg:"bg-emerald-100",text:"text-emerald-700",dot:"bg-emerald-500" },
+  arhivat:        { label:"Arhivat",        bg:"bg-slate-100",  text:"text-slate-600",  dot:"bg-slate-400" },
 };
 
 const SOLUTII = ["INL", "REP", "UNI", "REV", "VER", "GEO"];
@@ -73,6 +74,7 @@ const mkDosar = () => ({
     dataPredareMasinaSchimb:"", zileFacturabile:0, tarifZi:0, totalFacturabil:0
   },
   poze:[], note:"",
+  arhivat: false, dataArhivare: "",
   createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
 });
 
@@ -141,7 +143,16 @@ const getAsigEmail = (settings, companie, tip) => {
   return e.alte||e.despagubire||e.reconstatare||"";
 };
 
-// ─── STORAGE (Supabase) ─────────────────────────────────────────
+// Find first photo from any source
+const getFirstPhoto = (d) => {
+  const all = [
+    ...(d.poze||[]),
+    ...((d.reconstatari||[]).flatMap(r => r.poze||[]))
+  ];
+  return all.find(p => p.type?.startsWith("image"));
+};
+
+// ─── STORAGE ─────────────────────────────────────────────────────
 const uploadFile = async (dosarId, folder, file) => {
   const ext = file.name.split('.').pop();
   const path = `${dosarId}/${folder}/${Date.now()}_${Math.random().toString(36).slice(2,8)}.${ext}`;
@@ -156,6 +167,18 @@ const uploadFile = async (dosarId, folder, file) => {
 const deleteFile = async (path) => {
   if (!path) return;
   await supabase.storage.from(STORAGE_BUCKET).remove([path]);
+};
+
+// Get all file paths in a dosar
+const allFilePaths = (d) => {
+  const paths = [];
+  (d.poze||[]).forEach(p => p.path && paths.push(p.path));
+  (d.reconstatari||[]).forEach(r => {
+    (r.poze||[]).forEach(p => p.path && paths.push(p.path));
+    (r.documente||[]).forEach(doc => doc.path && paths.push(doc.path));
+  });
+  (d.despagubire?.documente||[]).forEach(doc => doc.path && paths.push(doc.path));
+  return paths;
 };
 
 // ─── EMAIL TEMPLATES ────────────────────────────────────────────
@@ -285,6 +308,7 @@ function LoginScreen({ onLogin }) {
 export default function App() {
   const [authed, setAuthed] = useState(() => localStorage.getItem("msm_auth") === "1");
   const [view, setView] = useState("dashboard");
+  const [listFilter, setListFilter] = useState("toate"); // toate / active / finalizate / arhivate
   const [dosare, setDosare] = useState([]);
   const [settings, setSettings] = useState(mkSettings());
   const [selected, setSelected] = useState(null);
@@ -320,12 +344,38 @@ export default function App() {
   };
 
   const deleteDosar = async id => {
-    if (!confirm("Ștergi definitiv dosarul?")) return;
+    if (!confirm("Ștergi definitiv dosarul (cu toate datele)?")) return;
     try {
+      const d = dosare.find(x=>x.id===id);
+      if (d) {
+        const paths = allFilePaths(d);
+        if (paths.length) await supabase.storage.from(STORAGE_BUCKET).remove(paths);
+      }
       await db.deleteDosar(id);
       setDosare(p=>p.filter(d=>d.id!==id));
       setSelected(null); setView("dashboard");
     } catch(e) { alert("Eroare la ștergere: "+e.message); }
+  };
+
+  const archiveDosar = async (d) => {
+    if (!confirm("Arhivare dosar:\n\n1. Se descarcă ZIP cu toate fișierele\n2. Se șterg pozele și documentele din cloud\n3. Detaliile (financiar, etape, mailuri) rămân în Rapoarte\n\nContinui?")) return;
+    try {
+      // 1. Download ZIP
+      await downloadDosarZip(d);
+      // 2. Delete files
+      const paths = allFilePaths(d);
+      if (paths.length) await supabase.storage.from(STORAGE_BUCKET).remove(paths);
+      // 3. Clean references, mark as archived
+      const cleanRecons = (d.reconstatari||[]).map(r => ({ ...r, poze: [], documente: [] }));
+      const cleanDespagubire = { ...(d.despagubire||{}), documente: [] };
+      const archived = {
+        ...d, arhivat: true, dataArhivare: new Date().toISOString(),
+        status: "arhivat",
+        poze: [], reconstatari: cleanRecons, despagubire: cleanDespagubire
+      };
+      await saveDosar(archived);
+      alert("✓ Dosar arhivat. Detaliile rămân disponibile în Rapoarte.");
+    } catch(e) { alert("Eroare la arhivare: "+e.message); }
   };
 
   const saveSettings = async s => {
@@ -343,12 +393,22 @@ export default function App() {
   const openEdit = d  => { setEditing({...d}); setTab("info"); setView("form"); };
   const openView = d  => { setSelected(d); setTab("info"); setView("detail"); };
 
-  const filtered = dosare.filter(d=>{
-    if (!search) return true;
-    const q = search.toLowerCase();
-    return [d.nrDosar,d.proprietar?.nume,d.masina?.nrInmatriculare,d.asigurator?.companie]
-      .some(v=>v?.toLowerCase().includes(q));
-  });
+  const openList = (filter="toate") => {
+    setListFilter(filter); setSearch(""); setView("list");
+  };
+
+  const filtered = useMemo(() => {
+    let result = dosare;
+    if (listFilter === "active") result = result.filter(d => d.status !== "finalizat" && d.status !== "arhivat");
+    else if (listFilter === "finalizate") result = result.filter(d => d.status === "finalizat" && !d.arhivat);
+    else if (listFilter === "arhivate") result = result.filter(d => d.arhivat);
+    if (search) {
+      const q = search.toLowerCase();
+      result = result.filter(d => [d.nrDosar,d.proprietar?.nume,d.masina?.nrInmatriculare,d.asigurator?.companie]
+        .some(v=>v?.toLowerCase().includes(q)));
+    }
+    return result;
+  }, [dosare, listFilter, search]);
 
   if (!authed) return <LoginScreen onLogin={()=>setAuthed(true)}/>;
 
@@ -359,11 +419,15 @@ export default function App() {
     </div>
   );
 
-  // RECONSTATARE WORKFLOW
   if (reconEditing && reconParentId) {
     const parentDosar = dosare.find(d=>d.id===reconParentId);
     return (
-      <Shell view="recon" offline={offline} onBack={()=>{setReconEditing(null);setReconParentId(null);}} onLogout={logout} onSettings={()=>{setView("settings");setReconEditing(null);setReconParentId(null);}} onSearch={()=>{setSearch("");setView("list");setReconEditing(null);setReconParentId(null);}} onNew={openNew}>
+      <Shell view="recon" offline={offline}
+        onBack={()=>{setReconEditing(null);setReconParentId(null);}}
+        onLogout={logout}
+        onSettings={()=>{setView("settings");setReconEditing(null);setReconParentId(null);}}
+        onSearch={()=>{setSearch("");setView("list");setReconEditing(null);setReconParentId(null);}}
+        onNew={openNew}>
         <ReconstatareWorkflow
           dosar={parentDosar}
           recon={reconEditing}
@@ -388,15 +452,16 @@ export default function App() {
       onBack={view==="dashboard"?null:()=>setView(view==="form"?(selected?"detail":"dashboard"):"dashboard")}
       onLogout={logout}
       onSettings={()=>setView("settings")}
-      onSearch={()=>{setSearch("");setView("list");}}
+      onSearch={()=>openList("toate")}
       onNew={openNew}>
-      {view==="dashboard" && <Dashboard dosare={dosare} onView={openView} onCreate={openNew} onViewAll={()=>setView("list")} onRapoarte={()=>setView("rapoarte")}/>}
+      {view==="dashboard" && <Dashboard dosare={dosare} onView={openView} onCreate={openNew} onOpenList={openList} onRapoarte={()=>setView("rapoarte")}/>}
       {view==="rapoarte" && <RapoarteView dosare={dosare} onUpdate={saveDosar} onView={openView}/>}
-      {view==="list" && <ListaView filtered={filtered} search={search} setSearch={setSearch} onView={openView}/>}
+      {view==="list" && <ListaView filtered={filtered} search={search} setSearch={setSearch} onView={openView} listFilter={listFilter} setListFilter={setListFilter}/>}
       {view==="settings" && <SettingsView settings={settings} onSave={saveSettings} onLogout={logout}/>}
       {view==="detail" && selected && (
         <DetailView dosar={selected} tab={tab} setTab={setTab} settings={settings}
           onEdit={()=>openEdit(selected)} onDelete={()=>deleteDosar(selected.id)} onUpdate={saveDosar}
+          onArchive={()=>archiveDosar(selected)}
           onAddRecon={()=>{ setReconEditing(mkReconstatare()); setReconParentId(selected.id); }}
           onEditRecon={(r)=>{ setReconEditing(r); setReconParentId(selected.id); }}/>
       )}
@@ -408,7 +473,7 @@ export default function App() {
   );
 }
 
-// ─── SHELL (header + responsive layout) ─────────────────────────
+// ─── SHELL ──────────────────────────────────────────────────────
 function Shell({ view, children, offline, onBack, onLogout, onSettings, onSearch, onNew }) {
   return (
     <div className="min-h-screen" style={{background:"#f1f5f9",fontFamily:"'DM Sans','Segoe UI',sans-serif"}}>
@@ -452,54 +517,62 @@ function Shell({ view, children, offline, onBack, onLogout, onSettings, onSearch
 }
 
 // ─── DASHBOARD ──────────────────────────────────────────────────
-function Dashboard({ dosare, onView, onCreate, onViewAll, onRapoarte }) {
+function Dashboard({ dosare, onView, onCreate, onOpenList, onRapoarte }) {
   const [period, setPeriod] = useState("1m");
+
   const stats = useMemo(()=>{
     const ps = getPeriodStart(period);
     const inp = dosare.filter(d=>new Date(d.updatedAt)>=ps);
+    // Comision de incasat = total comisioane neîncasate
+    const deIncasat = inp.filter(d => !d.financiar?.comisionIncasat).reduce((s,d)=>s+(d.financiar?.comision||0),0);
     return {
       total: dosare.length,
-      active: dosare.filter(d=>d.status!=="finalizat").length,
-      fin: dosare.filter(d=>d.status==="finalizat").length,
-      comisionTotal: inp.reduce((s,d)=>s+(d.financiar?.comision||0),0),
-      comisionIncasat: inp.filter(d=>d.financiar?.comisionIncasat).reduce((s,d)=>s+(d.financiar?.comision||0),0),
+      active: dosare.filter(d => d.status !== "finalizat" && d.status !== "arhivat").length,
+      fin: dosare.filter(d => d.status === "finalizat" && !d.arhivat).length,
+      arhivate: dosare.filter(d => d.arhivat).length,
+      deIncasat,
     };
   },[dosare,period]);
 
-  const recente = [...dosare].sort((a,b)=>new Date(b.updatedAt)-new Date(a.updatedAt)).slice(0,8);
+  const recente = [...dosare].filter(d=>!d.arhivat).sort((a,b)=>new Date(b.updatedAt)-new Date(a.updatedAt)).slice(0,8);
   const groups = Object.entries(STATUS).map(([k,v])=>({k,v,n:dosare.filter(d=>d.status===k).length})).filter(g=>g.n>0);
 
   return (
     <div className="space-y-4 max-w-2xl mx-auto">
       <div className="grid grid-cols-2 gap-3">
-        <StatBox label="Total dosare"  val={stats.total}  icon={<FileText size={18}/>}    accent="#38bdf8"/>
-        <StatBox label="Dosare active" val={stats.active} icon={<Clock size={18}/>}       accent="#fb923c"/>
-        <StatBox label="Finalizate"    val={stats.fin}    icon={<Check size={18}/>}       accent="#34d399"/>
+        <ClickableStat label="Total dosare"  val={stats.total}  icon={<FileText size={18}/>} accent="#38bdf8" onClick={()=>onOpenList("toate")}/>
+        <ClickableStat label="Dosare active" val={stats.active} icon={<Clock size={18}/>}    accent="#fb923c" onClick={()=>onOpenList("active")}/>
+        <ClickableStat label="Finalizate"    val={stats.fin}    icon={<Check size={18}/>}    accent="#34d399" onClick={()=>onOpenList("finalizate")}/>
         <button onClick={onRapoarte} className="bg-white rounded-2xl shadow-sm p-4 border border-slate-100 text-left hover:shadow-md transition-shadow">
           <div className="w-9 h-9 rounded-xl flex items-center justify-center mb-2" style={{background:"#a78bfa20",color:"#a78bfa"}}>
             <BarChart3 size={18}/>
           </div>
           <div className="text-xl font-bold text-slate-800 leading-tight">Rapoarte →</div>
-          <div className="text-xs text-slate-400 mt-0.5">{stats.comisionTotal.toFixed(0)} lei comision</div>
+          <div className="text-xs text-slate-400 mt-0.5">{stats.deIncasat.toFixed(0)} lei de încasat</div>
         </button>
       </div>
 
       <Card>
-        <div className="grid grid-cols-2 gap-3 mb-3">
-          <div>
-            <div className="text-[10px] text-slate-400 uppercase tracking-wider">Comision total</div>
-            <div className="text-lg font-bold text-slate-800">{stats.comisionTotal.toFixed(0)} lei</div>
-          </div>
-          <div>
-            <div className="text-[10px] text-emerald-500 uppercase tracking-wider">Comision încasat</div>
-            <div className="text-lg font-bold text-emerald-600">{stats.comisionIncasat.toFixed(0)} lei</div>
-          </div>
-        </div>
+        <div className="text-[10px] text-slate-400 uppercase tracking-wider mb-1">Comision de încasat</div>
+        <div className="text-2xl font-bold text-emerald-600 mb-3">{stats.deIncasat.toFixed(0)} lei</div>
         <select value={period} onChange={e=>setPeriod(e.target.value)}
           className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-sky-300">
           {PERIOD_OPTS.map(p=><option key={p.key} value={p.key}>{p.label}</option>)}
         </select>
       </Card>
+
+      {stats.arhivate > 0 && (
+        <button onClick={()=>onOpenList("arhivate")} className="w-full bg-white rounded-2xl shadow-sm p-3 border border-slate-100 flex items-center justify-between hover:bg-slate-50">
+          <div className="flex items-center gap-2.5">
+            <Archive size={16} className="text-slate-500"/>
+            <span className="text-sm font-medium text-slate-700">Dosare arhivate</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-bold text-slate-600">{stats.arhivate}</span>
+            <ChevronRight size={14} className="text-slate-400"/>
+          </div>
+        </button>
+      )}
 
       {groups.length>0 && (
         <Card>
@@ -521,7 +594,7 @@ function Dashboard({ dosare, onView, onCreate, onViewAll, onRapoarte }) {
       <Card>
         <div className="flex items-center justify-between mb-3">
           <ST>Dosare recente</ST>
-          <button onClick={onViewAll} className="text-sky-600 text-sm font-medium">Vezi toate →</button>
+          <button onClick={()=>onOpenList("toate")} className="text-sky-600 text-sm font-medium">Vezi toate →</button>
         </div>
         {recente.length===0 ? (
           <div className="text-center py-8">
@@ -539,24 +612,19 @@ function Dashboard({ dosare, onView, onCreate, onViewAll, onRapoarte }) {
   );
 }
 
-function StatBox({ label, val, icon, accent, children }) {
+function ClickableStat({ label, val, icon, accent, onClick }) {
   return (
-    <div className="bg-white rounded-2xl shadow-sm p-4 border border-slate-100">
+    <button onClick={onClick} className="bg-white rounded-2xl shadow-sm p-4 border border-slate-100 text-left hover:shadow-md transition-shadow">
       <div className="w-9 h-9 rounded-xl flex items-center justify-center mb-2" style={{background:accent+"20",color:accent}}>{icon}</div>
       <div className="text-xl font-bold text-slate-800 leading-tight">{val}</div>
       <div className="text-xs text-slate-400 mt-0.5">{label}</div>
-      {children}
-    </div>
+    </button>
   );
 }
 
 function DosarRow({ d, onClick }) {
   const s = STATUS[d.status]||STATUS.constatare;
-  const allPhotos = [
-    ...(d.poze||[]),
-    ...((d.reconstatari||[]).flatMap(r => r.poze||[]))
-  ];
-  const img = allPhotos.find(p=>p.type?.startsWith("image"));
+  const img = getFirstPhoto(d);
   return (
     <button onClick={onClick}
       className="w-full text-left flex items-center gap-3 p-2.5 rounded-xl hover:bg-slate-50 border border-slate-100 transition-all group">
@@ -566,7 +634,10 @@ function DosarRow({ d, onClick }) {
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between gap-2">
           <span className="font-semibold text-slate-800 text-sm truncate">{d.nrDosar||"Fără număr"}</span>
-          <span className={`text-[10px] px-2 py-0.5 rounded-full flex-shrink-0 ${s.bg} ${s.text} font-semibold`}>{s.label}</span>
+          <span className={`text-[10px] px-2 py-0.5 rounded-full flex-shrink-0 ${s.bg} ${s.text} font-semibold flex items-center gap-1`}>
+            {d.arhivat && <Archive size={9}/>}
+            {s.label}
+          </span>
         </div>
         <div className="flex items-center gap-2 mt-1">
           {d.masina?.nrInmatriculare && (
@@ -584,34 +655,63 @@ function DosarRow({ d, onClick }) {
   );
 }
 
+// ─── LISTA ──────────────────────────────────────────────────────
+function ListaView({ filtered, search, setSearch, onView, listFilter, setListFilter }) {
+  const filters = [
+    { k:"toate", l:"Toate" },
+    { k:"active", l:"Active" },
+    { k:"finalizate", l:"Finalizate" },
+    { k:"arhivate", l:"Arhivate" },
+  ];
+  return (
+    <div className="space-y-3 max-w-2xl mx-auto">
+      <div className="flex gap-1.5 overflow-x-auto pb-1">
+        {filters.map(f=>(
+          <button key={f.k} onClick={()=>setListFilter(f.k)}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap ${listFilter===f.k?"text-white":"bg-white text-slate-600 border border-slate-200"}`}
+            style={listFilter===f.k?{background:"#0f172a"}:{}}>
+            {f.l}
+          </button>
+        ))}
+      </div>
+      <div className="relative">
+        <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"/>
+        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Caută..."
+          className="w-full pl-10 pr-4 py-2.5 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 shadow-sm"/>
+      </div>
+      {filtered.length===0
+        ? <div className="text-center py-12 text-slate-400"><Search size={32} className="mx-auto mb-2 opacity-30"/><p>Niciun dosar găsit</p></div>
+        : filtered.map(d=><DosarRow key={d.id} d={d} onClick={()=>onView(d)}/>)
+      }
+    </div>
+  );
+}
+
 // ─── RAPOARTE VIEW ──────────────────────────────────────────────
 function RapoarteView({ dosare, onUpdate, onView }) {
-  const [filter, setFilter] = useState("toate"); // toate / neachitate / comision_neincasat
+  const [filter, setFilter] = useState("toate");
 
   const data = useMemo(()=>{
     return dosare
       .filter(d => {
         if (filter==="neachitate") return !d.financiar?.achitat;
         if (filter==="comision_neincasat") return !d.financiar?.comisionIncasat && d.financiar?.comision > 0;
+        if (filter==="arhivate") return d.arhivat;
         return true;
       })
-      .map(d => ({
-        ...d,
-        _calc: calcFin(d.financiar||{})
-      }));
+      .map(d => ({ ...d, _calc: calcFin(d.financiar||{}) }));
   }, [dosare, filter]);
 
   const totals = useMemo(()=>({
     facturat: data.reduce((s,d)=>s+Number(d.financiar?.sumaFacturata||0), 0),
     cheltuieli: data.reduce((s,d)=>s+(d._calc.totalCheltuieli||0), 0),
     diferenta: data.reduce((s,d)=>s+(d._calc.sumaRamasa||0), 0),
-    comision: data.reduce((s,d)=>s+(d._calc.comision||0), 0),
-    comisionIncasat: data.filter(d=>d.financiar?.comisionIncasat).reduce((s,d)=>s+(d._calc.comision||0), 0),
+    deIncasat: data.filter(d=>!d.financiar?.comisionIncasat).reduce((s,d)=>s+(d._calc.comision||0), 0),
+    incasat: data.filter(d=>d.financiar?.comisionIncasat).reduce((s,d)=>s+(d._calc.comision||0), 0),
   }), [data]);
 
   const toggleAchitat = async (d) => {
-    const newFin = { ...d.financiar, achitat: !d.financiar?.achitat };
-    await onUpdate({ ...d, financiar: newFin });
+    await onUpdate({ ...d, financiar: { ...d.financiar, achitat: !d.financiar?.achitat } });
   };
 
   const toggleComision = async (d) => {
@@ -641,6 +741,7 @@ function RapoarteView({ dosare, onUpdate, onView }) {
       "Achitări": (d.financiar?.achitari||[]).map(a=>`${a.data}: ${a.suma}`).join("; "),
       "Comision încasat": d.financiar?.comisionIncasat ? "Da" : "Nu",
       "Data încasare comision": d.financiar?.dataIncasareComision || "",
+      "Arhivat": d.arhivat ? "Da" : "Nu",
     }));
     const ws = XLSX.utils.json_to_sheet(rows);
     const wb = XLSX.utils.book_new();
@@ -665,12 +766,12 @@ function RapoarteView({ dosare, onUpdate, onView }) {
           <TotalBox label="Facturat" val={totals.facturat} c="#0f172a" bg="#f8fafc"/>
           <TotalBox label="Cheltuieli" val={totals.cheltuieli} c="#ef4444" bg="#fef2f2"/>
           <TotalBox label="Diferență" val={totals.diferenta} c="#0284c7" bg="#f0f9ff"/>
-          <TotalBox label="Comision total" val={totals.comision} c="#a78bfa" bg="#f5f3ff"/>
-          <TotalBox label="Comision încasat" val={totals.comisionIncasat} c="#059669" bg="#f0fdf4"/>
+          <TotalBox label="De încasat" val={totals.deIncasat} c="#a78bfa" bg="#f5f3ff"/>
+          <TotalBox label="Încasat" val={totals.incasat} c="#059669" bg="#f0fdf4"/>
         </div>
 
         <div className="flex gap-2 mt-4 flex-wrap">
-          {[["toate","Toate"],["neachitate","Neachitate"],["comision_neincasat","Comision neîncasat"]].map(([k,l])=>(
+          {[["toate","Toate"],["neachitate","Neachitate"],["comision_neincasat","Comision neîncasat"],["arhivate","Arhivate"]].map(([k,l])=>(
             <button key={k} onClick={()=>setFilter(k)}
               className={`px-3 py-1.5 rounded-lg text-xs font-medium ${filter===k?"text-white":"bg-slate-100 text-slate-600"}`}
               style={filter===k?{background:"#0f172a"}:{}}>{l}</button>
@@ -706,6 +807,7 @@ function TotalBox({ label, val, c, bg }) {
 function RaportRow({ d, onToggleAchitat, onToggleComision, onView, onUpdate }) {
   const [expanded, setExpanded] = useState(false);
   const [newAchitare, setNewAchitare] = useState({ data: today(), suma: "" });
+  const img = getFirstPhoto(d);
 
   const addAchitare = async () => {
     if (!newAchitare.suma) return;
@@ -728,12 +830,20 @@ function RaportRow({ d, onToggleAchitat, onToggleComision, onView, onUpdate }) {
       <div className="p-3 flex items-center gap-3">
         <input type="checkbox" checked={!!d.financiar?.achitat} onChange={onToggleAchitat}
           className="w-5 h-5 accent-emerald-500 flex-shrink-0"/>
+        {img ? (
+          <img src={img.url||img.data} alt="" className="w-10 h-10 rounded-lg object-cover flex-shrink-0 hidden md:block"/>
+        ) : (
+          <div className="w-10 h-10 rounded-lg bg-slate-100 flex items-center justify-center flex-shrink-0 hidden md:flex">
+            <Car size={16} className="text-slate-300"/>
+          </div>
+        )}
         <button onClick={onView} className="flex-1 min-w-0 text-left">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="font-semibold text-sm text-slate-800">{d.nrDosar}</span>
             {d.masina?.nrInmatriculare && (
               <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-900 text-white font-bold tracking-wider">{d.masina.nrInmatriculare}</span>
             )}
+            {d.arhivat && <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-200 text-slate-600 font-semibold flex items-center gap-0.5"><Archive size={9}/>arh</span>}
           </div>
           <div className="text-xs text-slate-500 mt-0.5 truncate">
             {d.asigurator?.companie} · {d.proprietar?.nume}
@@ -741,7 +851,9 @@ function RaportRow({ d, onToggleAchitat, onToggleComision, onView, onUpdate }) {
           <div className="flex gap-3 mt-1 text-xs flex-wrap">
             <span className="text-slate-600">F: <strong>{Number(d.financiar?.sumaFacturata||0).toFixed(0)} lei</strong></span>
             <span className="text-slate-600">C: <strong>{Number(d._calc.totalCheltuieli||0).toFixed(0)} lei</strong></span>
-            <span className="text-emerald-600 font-semibold">5%: {(d._calc.comision||0).toFixed(2)} lei</span>
+            <span className={`font-semibold ${d.financiar?.comisionIncasat?"text-emerald-600":"text-violet-600"}`}>
+              5%: {(d._calc.comision||0).toFixed(2)} lei {d.financiar?.comisionIncasat && "✓"}
+            </span>
           </div>
         </button>
         <button onClick={()=>setExpanded(!expanded)} className="p-1.5 text-slate-400 flex-shrink-0">
@@ -751,7 +863,6 @@ function RaportRow({ d, onToggleAchitat, onToggleComision, onView, onUpdate }) {
 
       {expanded && (
         <div className="border-t border-slate-100 p-3 space-y-3 bg-slate-50">
-          {/* Factură */}
           <div className="grid grid-cols-2 gap-2 text-xs">
             <div><span className="text-slate-400">Nr. factură:</span> <strong>{d.financiar?.nrFactura||"—"}</strong></div>
             <div><span className="text-slate-400">Data:</span> <strong>{fmtDate(d.financiar?.dataFactura)}</strong></div>
@@ -759,7 +870,6 @@ function RaportRow({ d, onToggleAchitat, onToggleComision, onView, onUpdate }) {
             <div><span className="text-slate-400">Diferență:</span> <strong className="text-sky-600">{(d._calc.sumaRamasa||0).toFixed(0)} lei</strong></div>
           </div>
 
-          {/* Achitări */}
           <div className="bg-white rounded-lg p-2.5 border border-slate-100">
             <div className="text-xs font-semibold text-slate-600 mb-2">Încasări factură</div>
             {(d.financiar?.achitari||[]).length > 0 && (
@@ -774,14 +884,13 @@ function RaportRow({ d, onToggleAchitat, onToggleComision, onView, onUpdate }) {
             )}
             <div className="flex gap-1">
               <input type="date" value={newAchitare.data} onChange={e=>setNewAchitare(p=>({...p,data:e.target.value}))}
-                className="border border-slate-200 rounded px-2 py-1 text-xs flex-1"/>
+                className="border border-slate-200 rounded px-2 py-1 text-xs flex-1 min-w-0"/>
               <input type="number" value={newAchitare.suma} onChange={e=>setNewAchitare(p=>({...p,suma:e.target.value}))}
                 placeholder="lei" className="border border-slate-200 rounded px-2 py-1 text-xs w-20"/>
               <button onClick={addAchitare} className="px-2 py-1 rounded bg-emerald-500 text-white text-xs"><Plus size={12}/></button>
             </div>
           </div>
 
-          {/* Comision */}
           <div className="bg-white rounded-lg p-2.5 border border-slate-100 flex items-center justify-between">
             <div className="flex items-center gap-2">
               <input type="checkbox" checked={!!d.financiar?.comisionIncasat} onChange={onToggleComision}
@@ -794,23 +903,6 @@ function RaportRow({ d, onToggleAchitat, onToggleComision, onView, onUpdate }) {
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-// ─── LISTA ──────────────────────────────────────────────────────
-function ListaView({ filtered, search, setSearch, onView }) {
-  return (
-    <div className="space-y-3 max-w-2xl mx-auto">
-      <div className="relative">
-        <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"/>
-        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Caută număr dosar, proprietar..."
-          className="w-full pl-10 pr-4 py-2.5 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 shadow-sm"/>
-      </div>
-      {filtered.length===0
-        ? <div className="text-center py-12 text-slate-400"><Search size={32} className="mx-auto mb-2 opacity-30"/><p>Niciun dosar găsit</p></div>
-        : filtered.map(d=><DosarRow key={d.id} d={d} onClick={()=>onView(d)}/>)
-      }
     </div>
   );
 }
@@ -850,15 +942,6 @@ function SettingsView({ settings, onSave, onLogout }) {
       {tab==="emailjs" && (
         <Card>
           <ST>Configurare EmailJS</ST>
-          <div className="bg-sky-50 border border-sky-100 rounded-xl p-3 mb-4 text-xs text-sky-800">
-            <div className="font-semibold mb-2">📧 Pași:</div>
-            <ol className="list-decimal list-inside space-y-1 text-sky-700">
-              <li>Cont gratuit pe <strong>emailjs.com</strong></li>
-              <li>Add Email Service → Gmail → conectează contul</li>
-              <li>Create Template cu variabile: <code className="bg-white px-1 rounded">{`{{to_email}} {{subject}} {{message}} {{from_name}}`}</code></li>
-              <li>Copiază Service ID, Template ID și Public Key aici</li>
-            </ol>
-          </div>
           <FF label="Service ID"      v={s.emailjs.serviceId}   set={v=>updE("serviceId",v)}   ph="service_xxxxxxx"/>
           <FF label="Template ID"     v={s.emailjs.templateId}  set={v=>updE("templateId",v)}  ph="template_xxxxxxx"/>
           <FF label="Public Key"      v={s.emailjs.publicKey}   set={v=>updE("publicKey",v)}   ph="aBcDeFgHiJkLmN"/>
@@ -902,9 +985,10 @@ function SettingsView({ settings, onSave, onLogout }) {
   );
 }
 
-// ─── DETAIL VIEW (two-column on desktop) ────────────────────────
-function DetailView({ dosar, tab, setTab, settings, onEdit, onDelete, onUpdate, onAddRecon, onEditRecon }) {
+// ─── DETAIL VIEW ───────────────────────────────────────────────
+function DetailView({ dosar, tab, setTab, settings, onEdit, onDelete, onUpdate, onArchive, onAddRecon, onEditRecon }) {
   const s = STATUS[dosar.status]||STATUS.constatare;
+  const img = getFirstPhoto(dosar);
   const TABS = [
     {id:"info",        label:"Info",        icon:<User size={13}/>},
     {id:"reconstatare",label:"Reconstatare",icon:<ListChecks size={13}/>},
@@ -913,31 +997,39 @@ function DetailView({ dosar, tab, setTab, settings, onEdit, onDelete, onUpdate, 
     {id:"financiar",   label:"Financiar",   icon:<DollarSign size={13}/>},
   ];
 
+  const isArchivable = dosar.status === "finalizat" && !dosar.arhivat;
+
   return (
     <div className="lg:grid lg:grid-cols-[1fr_2fr] lg:gap-4 lg:items-start max-w-6xl mx-auto">
-      {/* Sidebar (desktop) / Card top (mobile) */}
       <div className="space-y-3 mb-3 lg:mb-0">
+        {/* Enhanced header */}
         <Card>
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0 flex-1">
-              <h1 className="font-bold text-slate-800 text-xl truncate">{dosar.nrDosar||"Fără număr"}</h1>
-              <div className="flex items-center gap-2 mt-1.5 flex-wrap">
-                {dosar.masina?.nrInmatriculare && (
-                  <span className="text-xs px-2 py-0.5 rounded bg-slate-900 text-white font-bold tracking-wider">{dosar.masina.nrInmatriculare}</span>
-                )}
-                <span className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full font-semibold ${s.bg} ${s.text}`}>
-                  <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`}></span>{s.label}
-                </span>
+          <div className="flex items-start gap-3">
+            <div className="w-16 h-16 rounded-xl flex-shrink-0 overflow-hidden bg-slate-100 flex items-center justify-center border border-slate-200">
+              {img ? <img src={img.url||img.data} alt="" className="w-full h-full object-cover"/> : <Car size={28} className="text-slate-300"/>}
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Dosar</div>
+              <h1 className="font-bold text-slate-800 text-lg truncate">{dosar.nrDosar||"Fără număr"}</h1>
+              {dosar.masina?.nrInmatriculare && (
+                <span className="inline-block mt-1 text-xs px-2 py-0.5 rounded bg-slate-900 text-white font-bold tracking-wider">{dosar.masina.nrInmatriculare}</span>
+              )}
+              <div className="text-xs text-slate-500 mt-1 truncate">
+                {dosar.masina?.marca} {dosar.masina?.model}
               </div>
             </div>
-            <div className="flex gap-2 flex-shrink-0">
+          </div>
+          <div className="flex items-center justify-between mt-3 pt-3 border-t border-slate-100">
+            <span className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full font-semibold ${s.bg} ${s.text}`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`}></span>{s.label}
+            </span>
+            <div className="flex gap-2">
               <button onClick={onEdit} className="p-2 rounded-xl bg-sky-50 text-sky-600 hover:bg-sky-100"><Edit size={15}/></button>
               <button onClick={onDelete} className="p-2 rounded-xl bg-red-50 text-red-500 hover:bg-red-100"><Trash2 size={15}/></button>
             </div>
           </div>
         </Card>
 
-        {/* Tabs */}
         <div className="bg-white rounded-2xl shadow-sm p-1.5 border border-slate-100 flex lg:flex-col gap-1 overflow-x-auto lg:overflow-visible">
           {TABS.map(t=>(
             <button key={t.id} onClick={()=>setTab(t.id)}
@@ -948,12 +1040,27 @@ function DetailView({ dosar, tab, setTab, settings, onEdit, onDelete, onUpdate, 
           ))}
         </div>
 
+        {dosar.arhivat && (
+          <div className="bg-slate-100 border border-slate-200 rounded-xl p-3 text-xs text-slate-600 flex items-start gap-2">
+            <Archive size={14} className="flex-shrink-0 mt-0.5"/>
+            <div>
+              <strong>Dosar arhivat</strong> la {fmtDate(dosar.dataArhivare)}<br/>
+              Pozele și documentele au fost șterse. Detaliile rămân disponibile.
+            </div>
+          </div>
+        )}
+
         <button onClick={()=>downloadDosarZip(dosar)} className="hidden lg:flex w-full items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium bg-emerald-50 text-emerald-700 hover:bg-emerald-100">
           <Download size={14}/> Descarcă dosar (ZIP)
         </button>
+
+        {isArchivable && (
+          <button onClick={onArchive} className="hidden lg:flex w-full items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium bg-amber-50 text-amber-700 hover:bg-amber-100">
+            <Archive size={14}/> Arhivează (eliberează spațiu)
+          </button>
+        )}
       </div>
 
-      {/* Content */}
       <div className="space-y-3 min-w-0">
         {tab==="info"         && <InfoTab dosar={dosar} onEditRecon={onEditRecon}/>}
         {tab==="reconstatare" && <ReconstatareList dosar={dosar} onAdd={onAddRecon} onEdit={onEditRecon} onUpdate={onUpdate}/>}
@@ -961,9 +1068,16 @@ function DetailView({ dosar, tab, setTab, settings, onEdit, onDelete, onUpdate, 
         {tab==="despagubire"  && <DespagubireTab dosar={dosar} settings={settings} onUpdate={onUpdate}/>}
         {tab==="financiar"    && <FinanciarTab dosar={dosar} onUpdate={onUpdate}/>}
 
-        <button onClick={()=>downloadDosarZip(dosar)} className="lg:hidden w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium bg-emerald-50 text-emerald-700">
-          <Download size={14}/> Descarcă dosar (ZIP)
-        </button>
+        <div className="lg:hidden space-y-2">
+          <button onClick={()=>downloadDosarZip(dosar)} className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium bg-emerald-50 text-emerald-700">
+            <Download size={14}/> Descarcă dosar (ZIP)
+          </button>
+          {isArchivable && (
+            <button onClick={onArchive} className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium bg-amber-50 text-amber-700">
+              <Archive size={14}/> Arhivează (eliberează spațiu)
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -975,30 +1089,37 @@ async function downloadDosarZip(dosar) {
     const zip = new JSZip();
     const folder = zip.folder(`dosar_${dosar.nrDosar||dosar.id}`);
 
-    // Info text
     let info = `MSM Management Daune\n${"=".repeat(40)}\n\n`;
     info += `Dosar: ${dosar.nrDosar}\nProprietar: ${dosar.proprietar?.nume}\n`;
     info += `Telefon: ${dosar.proprietar?.telefon}\nEmail: ${dosar.proprietar?.email}\n\n`;
     info += `Mașină: ${dosar.masina?.marca} ${dosar.masina?.model} (${dosar.masina?.an})\n`;
     info += `Înmatriculare: ${dosar.masina?.nrInmatriculare}\nVIN: ${dosar.masina?.vin}\n\n`;
     info += `Asigurator: ${dosar.asigurator?.companie}\nInspector: ${dosar.asigurator?.inspector}\n`;
-    info += `Data eveniment: ${fmtDate(dosar.dataEveniment)}\nData constatare: ${fmtDate(dosar.dataConstatare)}\n`;
+    info += `Data eveniment: ${fmtDate(dosar.dataEveniment)}\nData constatare: ${fmtDate(dosar.dataConstatare)}\n\n`;
+    if (dosar.financiar?.sumaFacturata) {
+      info += `\n--- FINANCIAR ---\n`;
+      info += `Nr. factură: ${dosar.financiar.nrFactura}\n`;
+      info += `Suma factură: ${dosar.financiar.sumaFacturata} lei\n`;
+      info += `Data factură: ${fmtDate(dosar.financiar.dataFactura)}\n`;
+      info += `Scadență: ${fmtDate(dosar.financiar.dataScadenta)}\n`;
+      info += `Cheltuieli: ${dosar.financiar.totalCheltuieli||0} lei\n`;
+      info += `Diferență: ${dosar.financiar.sumaRamasa||0} lei\n`;
+      info += `Comision 5%: ${(dosar.financiar.comision||0).toFixed(2)} lei\n`;
+    }
     folder.file("info.txt", info);
 
-    // Poze dosar
     const fetchAndAdd = async (file, path) => {
       try {
         const r = await fetch(file.url || file.data);
         const blob = await r.blob();
         folder.file(path, blob);
-      } catch(e) { console.error("Skip:", path); }
+      } catch(e) { console.error("Skip:", path, e); }
     };
 
     for (const p of (dosar.poze||[])) {
-      await fetchAndAdd(p, `poze/${p.name||"poza.jpg"}`);
+      await fetchAndAdd(p, `poze_dosar/${p.name||"poza.jpg"}`);
     }
 
-    // Reconstatari
     for (let i=0; i<(dosar.reconstatari||[]).length; i++) {
       const r = dosar.reconstatari[i];
       const rFolder = folder.folder(`reconstatare_${i+1}_${r.data}`);
@@ -1020,7 +1141,6 @@ async function downloadDosarZip(dosar) {
       }
     }
 
-    // Despagubire
     if (dosar.despagubire?.documente?.length || dosar.despagubire?.emailSent) {
       const dFolder = folder.folder("despagubire");
       if (dosar.despagubire.emailExtra) dFolder.file("text_email.txt", dosar.despagubire.emailExtra);
@@ -1039,11 +1159,32 @@ async function downloadDosarZip(dosar) {
   }
 }
 
-// ─── INFO TAB (cu istoric etape) ───────────────────────────────
+// ─── INFO TAB ──────────────────────────────────────────────────
 function InfoTab({ dosar, onEditRecon }) {
   const recons = dosar.reconstatari || [];
+  const [galIdx, setGalIdx] = useState(null);
+  const imagini = (dosar.poze||[]).filter(p=>p.type?.startsWith("image"));
+
   return (
     <div className="space-y-3">
+      {/* Poze dosar (dacă există) */}
+      {imagini.length > 0 && (
+        <Card>
+          <ST>Poze dosar ({imagini.length})</ST>
+          <div className="grid grid-cols-4 gap-2">
+            {imagini.map((p, idx) => (
+              <button key={p.path||p.url} onClick={()=>setGalIdx(idx)} className="relative aspect-square rounded-lg overflow-hidden border border-slate-100 hover:opacity-80">
+                <img src={p.url||p.data} alt={p.name} className="w-full h-full object-cover"/>
+              </button>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {galIdx !== null && imagini[galIdx] && (
+        <PhotoGallery photos={imagini} index={galIdx} onClose={()=>setGalIdx(null)} onIndex={setGalIdx}/>
+      )}
+
       <Sec title="Proprietar" icon={<User size={15}/>}>
         <IR l="Nume" v={dosar.proprietar?.nume}/><IR l="Telefon" v={dosar.proprietar?.telefon}/><IR l="Email" v={dosar.proprietar?.email}/>
       </Sec>
@@ -1063,7 +1204,6 @@ function InfoTab({ dosar, onEditRecon }) {
         <div className="relative">
           <div className="absolute left-[7px] top-0 bottom-0 w-px bg-slate-100"></div>
           <div className="space-y-3">
-            {/* Constatare inițială */}
             <div className="flex gap-3 items-start">
               <span className="w-3.5 h-3.5 rounded-full bg-sky-500 flex-shrink-0 mt-0.5 border-2 border-white shadow-sm z-10 relative"></span>
               <div className="flex-1 min-w-0">
@@ -1072,7 +1212,6 @@ function InfoTab({ dosar, onEditRecon }) {
               </div>
             </div>
 
-            {/* Reconstatări */}
             {recons.map((r,i) => (
               <button key={r.id} onClick={()=>onEditRecon(r)} className="w-full flex gap-3 items-start text-left hover:bg-slate-50 rounded-lg p-1 -m-1 transition-colors">
                 <span className="w-3.5 h-3.5 rounded-full bg-amber-400 flex-shrink-0 mt-0.5 border-2 border-white shadow-sm z-10 relative"></span>
@@ -1089,13 +1228,22 @@ function InfoTab({ dosar, onEditRecon }) {
               </button>
             ))}
 
-            {/* Despagubire */}
             {dosar.despagubire?.emailSent && (
               <div className="flex gap-3 items-start">
                 <span className="w-3.5 h-3.5 rounded-full bg-emerald-500 flex-shrink-0 mt-0.5 border-2 border-white shadow-sm z-10 relative"></span>
                 <div className="flex-1 min-w-0">
                   <span className="font-semibold text-sm text-emerald-700">Despăgubire trimisă</span>
                   <div className="text-xs text-slate-400">{fmtDate(dosar.despagubire.emailSentAt)}</div>
+                </div>
+              </div>
+            )}
+
+            {dosar.arhivat && (
+              <div className="flex gap-3 items-start">
+                <span className="w-3.5 h-3.5 rounded-full bg-slate-400 flex-shrink-0 mt-0.5 border-2 border-white shadow-sm z-10 relative"></span>
+                <div className="flex-1 min-w-0">
+                  <span className="font-semibold text-sm text-slate-700">Arhivat</span>
+                  <div className="text-xs text-slate-400">{fmtDate(dosar.dataArhivare)}</div>
                 </div>
               </div>
             )}
@@ -1127,16 +1275,65 @@ function IR({ l, v }) {
   );
 }
 
+// ─── PHOTO GALLERY ──────────────────────────────────────────────
+function PhotoGallery({ photos, index, onClose, onIndex }) {
+  const prev = () => onIndex(index === 0 ? photos.length - 1 : index - 1);
+  const next = () => onIndex(index === photos.length - 1 ? 0 : index + 1);
+
+  useEffect(() => {
+    const h = ev => {
+      if (ev.key === "ArrowLeft") prev();
+      else if (ev.key === "ArrowRight") next();
+      else if (ev.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+    // eslint-disable-next-line
+  }, [index, photos.length]);
+
+  const touchStart = useRef(null);
+  const onTouchStart = e => { touchStart.current = e.touches[0].clientX; };
+  const onTouchEnd = e => {
+    if (touchStart.current === null) return;
+    const diff = e.changedTouches[0].clientX - touchStart.current;
+    if (Math.abs(diff) > 50) { diff > 0 ? prev() : next(); }
+    touchStart.current = null;
+  };
+
+  const photo = photos[index];
+
+  return (
+    <div className="fixed inset-0 z-[100] bg-black/95 flex flex-col"
+      onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
+      <div className="flex justify-between items-center p-4 text-white">
+        <div className="text-sm">{index + 1} / {photos.length}</div>
+        <button onClick={onClose} className="p-2 rounded-full bg-white/10"><X size={18}/></button>
+      </div>
+      <div className="flex-1 flex items-center justify-center relative px-2">
+        <button onClick={prev} className="absolute left-2 p-3 rounded-full bg-white/10 text-white hover:bg-white/20 z-10">
+          <ChevronLeft size={22}/>
+        </button>
+        <img src={photo.url||photo.data} alt={photo.name} className="max-w-full max-h-full object-contain select-none"/>
+        <button onClick={next} className="absolute right-2 p-3 rounded-full bg-white/10 text-white hover:bg-white/20 z-10">
+          <ChevronRight size={22}/>
+        </button>
+      </div>
+      <div className="p-4 text-center text-white/70 text-xs">{photo.name}</div>
+    </div>
+  );
+}
+
 // ─── RECONSTATARE LIST ─────────────────────────────────────────
 function ReconstatareList({ dosar, onAdd, onEdit, onUpdate }) {
   const recons = dosar.reconstatari || [];
+  const blocked = dosar.arhivat;
 
   const del = async (id) => {
     if (!confirm("Ștergi reconstatarea?")) return;
-    // Delete files from storage
     const r = recons.find(x=>x.id===id);
     if (r) {
-      await Promise.all([...(r.poze||[]), ...(r.documente||[])].map(f => deleteFile(f.path)));
+      const paths = [...(r.poze||[]).map(p=>p.path), ...(r.documente||[]).map(d=>d.path)].filter(Boolean);
+      if (paths.length) await supabase.storage.from(STORAGE_BUCKET).remove(paths);
     }
     await onUpdate({ ...dosar, reconstatari: recons.filter(r=>r.id!==id) });
   };
@@ -1145,10 +1342,18 @@ function ReconstatareList({ dosar, onAdd, onEdit, onUpdate }) {
     <Card>
       <div className="flex items-center justify-between mb-4">
         <ST>Reconstatări ({recons.length})</ST>
-        <button onClick={onAdd} className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-sm font-semibold text-white" style={{background:"#0f172a"}}>
-          <Plus size={14}/> Adaugă reconstatare
-        </button>
+        {!blocked && (
+          <button onClick={onAdd} className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-sm font-semibold text-white" style={{background:"#0f172a"}}>
+            <Plus size={14}/> Adaugă
+          </button>
+        )}
       </div>
+
+      {blocked && (
+        <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 mb-3 text-xs text-slate-600 text-center">
+          Dosar arhivat — nu se pot adăuga reconstatări noi.
+        </div>
+      )}
 
       {recons.length === 0 ? (
         <div className="text-center py-8">
@@ -1170,9 +1375,11 @@ function ReconstatareList({ dosar, onAdd, onEdit, onUpdate }) {
                     {r.emailSent && <span className="text-emerald-600 flex items-center gap-1"><Check size={11}/>trimis</span>}
                   </div>
                 </button>
-                <button onClick={()=>del(r.id)} className="p-1.5 rounded-lg bg-red-50 text-red-500 flex-shrink-0">
-                  <Trash2 size={13}/>
-                </button>
+                {!blocked && (
+                  <button onClick={()=>del(r.id)} className="p-1.5 rounded-lg bg-red-50 text-red-500 flex-shrink-0">
+                    <Trash2 size={13}/>
+                  </button>
+                )}
               </div>
             </div>
           ))}
@@ -1189,6 +1396,7 @@ function ReconstatareWorkflow({ dosar, recon, settings, onSave, onCancel }) {
   const [emailErr, setEmailErr] = useState("");
   const [uploadingPoze, setUploadingPoze] = useState(false);
   const [uploadingDoc, setUploadingDoc] = useState(false);
+  const [galIdx, setGalIdx] = useState(null);
   const pozeRef = useRef();
   const docRef = useRef();
 
@@ -1213,6 +1421,7 @@ function ReconstatareWorkflow({ dosar, recon, settings, onSave, onCancel }) {
   };
 
   const delPoza = async (poza) => {
+    if (!confirm("Ștergi poza?")) return;
     await deleteFile(poza.path);
     setE(p => ({ ...p, poze: p.poze.filter(x => x.path !== poza.path) }));
   };
@@ -1229,6 +1438,7 @@ function ReconstatareWorkflow({ dosar, recon, settings, onSave, onCancel }) {
   };
 
   const delDoc = async (doc) => {
+    if (!confirm("Ștergi documentul?")) return;
     await deleteFile(doc.path);
     setE(p => ({ ...p, documente: p.documente.filter(x => x.path !== doc.path) }));
   };
@@ -1248,24 +1458,30 @@ function ReconstatareWorkflow({ dosar, recon, settings, onSave, onCancel }) {
     } catch(err) { setEmailStatus("error"); setEmailErr(err.message); }
   };
 
-  const mailto = () => {
-    if (!recipient) { setEmailStatus("error"); setEmailErr(`Adresa lipsește.`); return; }
-    window.open(`mailto:${recipient}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`);
-  };
+  const imagini = (e.poze||[]).filter(p=>p.type?.startsWith("image"));
 
   return (
     <div className="space-y-3 max-w-3xl mx-auto">
       <Card>
         <div className="flex items-center justify-between">
-          <div>
-            <div className="text-xs text-amber-600 font-semibold uppercase tracking-wider">Reconstatare</div>
-            <h2 className="font-bold text-slate-800 text-lg">Dosar {dosar.nrDosar}</h2>
-            <div className="flex items-center gap-2 mt-1">
-              {dosar.masina?.nrInmatriculare && <span className="text-[11px] px-1.5 py-0.5 rounded bg-slate-900 text-white font-bold tracking-wider">{dosar.masina.nrInmatriculare}</span>}
-              <span className="text-xs text-slate-500">{dosar.masina?.marca} {dosar.masina?.model}</span>
+          <div className="flex items-start gap-3 flex-1 min-w-0">
+            {getFirstPhoto(dosar) ? (
+              <img src={(getFirstPhoto(dosar)).url} alt="" className="w-12 h-12 rounded-xl object-cover flex-shrink-0"/>
+            ) : (
+              <div className="w-12 h-12 rounded-xl bg-slate-100 flex items-center justify-center flex-shrink-0">
+                <Car size={20} className="text-slate-300"/>
+              </div>
+            )}
+            <div className="min-w-0">
+              <div className="text-xs text-amber-600 font-semibold uppercase tracking-wider">Reconstatare</div>
+              <h2 className="font-bold text-slate-800 text-lg truncate">Dosar {dosar.nrDosar}</h2>
+              <div className="flex items-center gap-2 mt-1">
+                {dosar.masina?.nrInmatriculare && <span className="text-[11px] px-1.5 py-0.5 rounded bg-slate-900 text-white font-bold tracking-wider">{dosar.masina.nrInmatriculare}</span>}
+                <span className="text-xs text-slate-500 truncate">{dosar.masina?.marca} {dosar.masina?.model}</span>
+              </div>
             </div>
           </div>
-          <button onClick={onCancel} className="p-2 rounded-xl bg-slate-100 text-slate-500"><X size={16}/></button>
+          <button onClick={onCancel} className="p-2 rounded-xl bg-slate-100 text-slate-500 flex-shrink-0 ml-2"><X size={16}/></button>
         </div>
       </Card>
 
@@ -1282,7 +1498,7 @@ function ReconstatareWorkflow({ dosar, recon, settings, onSave, onCancel }) {
 
       <Card>
         <div className="flex items-center justify-between mb-3">
-          <ST>2. Poze</ST>
+          <ST>2. Poze ({(e.poze||[]).length})</ST>
           <button onClick={()=>pozeRef.current.click()} disabled={uploadingPoze} className="flex items-center gap-1 text-sky-600 text-sm font-medium disabled:opacity-50">
             <Camera size={15}/> {uploadingPoze?"Se urcă...":"Adaugă"}
           </button>
@@ -1295,9 +1511,9 @@ function ReconstatareWorkflow({ dosar, recon, settings, onSave, onCancel }) {
           </button>
         ) : (
           <div className="grid grid-cols-3 gap-2">
-            {e.poze.map((p) => (
+            {imagini.map((p, idx) => (
               <div key={p.path||p.url} className="relative aspect-square rounded-lg overflow-hidden border border-slate-100 group">
-                <img src={p.url||p.data} alt={p.name} className="w-full h-full object-cover"/>
+                <img src={p.url||p.data} alt={p.name} className="w-full h-full object-cover cursor-pointer" onClick={()=>setGalIdx(idx)}/>
                 <button onClick={()=>delPoza(p)} className="absolute top-1 right-1 bg-red-500 text-white rounded-full p-0.5 shadow-md">
                   <X size={11}/>
                 </button>
@@ -1306,6 +1522,10 @@ function ReconstatareWorkflow({ dosar, recon, settings, onSave, onCancel }) {
           </div>
         )}
       </Card>
+
+      {galIdx !== null && imagini[galIdx] && (
+        <PhotoGallery photos={imagini} index={galIdx} onClose={()=>setGalIdx(null)} onIndex={setGalIdx}/>
+      )}
 
       <Card>
         <div className="flex items-center justify-between mb-3">
@@ -1417,22 +1637,17 @@ function ReconstatareWorkflow({ dosar, recon, settings, onSave, onCancel }) {
             <Check size={14}/> Mail trimis la {fmtDate(e.emailSentAt)}
           </div>
         )}
-        <div className="space-y-2">
-          {ejsOk ? (
-            <button onClick={sendNow} disabled={emailStatus==="sending"}
-              className="w-full py-3 rounded-xl text-sm font-semibold text-white flex items-center justify-center gap-2 disabled:opacity-60"
-              style={{background:"#0f172a"}}>
-              <Send size={14}/>{emailStatus==="sending"?"Se trimite...":"Trimite mail"}
-            </button>
-          ) : (
-            <div className="bg-amber-50 border border-amber-200 rounded-xl p-2.5 text-xs text-amber-700 text-center">
-              Configurează EmailJS în Setări
-            </div>
-          )}
-          <button onClick={mailto} className="w-full py-2 rounded-xl text-xs font-medium border border-slate-200 bg-white text-slate-600">
-            Deschide în app Mail (fallback)
+        {ejsOk ? (
+          <button onClick={sendNow} disabled={emailStatus==="sending"}
+            className="w-full py-3 rounded-xl text-sm font-semibold text-white flex items-center justify-center gap-2 disabled:opacity-60"
+            style={{background:"#0f172a"}}>
+            <Send size={14}/>{emailStatus==="sending"?"Se trimite...":"Trimite mail"}
           </button>
-        </div>
+        ) : (
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-2.5 text-xs text-amber-700 text-center">
+            Configurează EmailJS în Setări
+          </div>
+        )}
       </Card>
 
       <div className="flex gap-3 sticky bottom-2">
@@ -1472,6 +1687,7 @@ function DespagubireTab({ dosar, settings, onUpdate }) {
   };
 
   const delDoc = async (doc) => {
+    if (!confirm("Ștergi documentul?")) return;
     await deleteFile(doc.path);
     await onUpdate({ ...dosar, despagubire: { ...dosar.despagubire, documente: docs.filter(x=>x.path!==doc.path) } });
   };
@@ -1489,11 +1705,6 @@ function DespagubireTab({ dosar, settings, onUpdate }) {
       await onUpdate({ ...dosar, despagubire: { ...dosar.despagubire, emailExtra: extra, emailSent: true, emailSentAt: new Date().toISOString() }, status: "finalizat" });
       setTimeout(()=>setStatus(null), 3000);
     } catch(e) { setStatus("error"); setErr(e.message); }
-  };
-
-  const mailto = () => {
-    if (!recipient) { setStatus("error"); setErr(`Adresa lipsește.`); return; }
-    window.open(`mailto:${recipient}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`);
   };
 
   const saveExtra = () => onUpdate({ ...dosar, despagubire: { ...dosar.despagubire, emailExtra: extra } });
@@ -1530,9 +1741,11 @@ function DespagubireTab({ dosar, settings, onUpdate }) {
       <Card>
         <div className="flex items-center justify-between mb-3">
           <ST>Documente atașate</ST>
-          <button onClick={()=>docRef.current.click()} disabled={uploading} className="flex items-center gap-1 text-sky-600 text-sm font-medium disabled:opacity-50">
-            <Paperclip size={15}/> {uploading?"Se urcă...":"Atașează"}
-          </button>
+          {!dosar.arhivat && (
+            <button onClick={()=>docRef.current.click()} disabled={uploading} className="flex items-center gap-1 text-sky-600 text-sm font-medium disabled:opacity-50">
+              <Paperclip size={15}/> {uploading?"Se urcă...":"Atașează"}
+            </button>
+          )}
         </div>
         <input ref={docRef} type="file" multiple className="hidden" onChange={addDocs}/>
         {docs.length===0 ? (
@@ -1543,7 +1756,7 @@ function DespagubireTab({ dosar, settings, onUpdate }) {
               <div key={d.path} className="flex items-center gap-2 bg-slate-50 rounded-lg px-3 py-2">
                 <FileText size={14} className="text-slate-400 flex-shrink-0"/>
                 <a href={d.url} target="_blank" rel="noreferrer" className="flex-1 text-sm text-slate-700 truncate hover:text-sky-600">{d.name}</a>
-                <button onClick={()=>delDoc(d)} className="text-red-400"><X size={13}/></button>
+                {!dosar.arhivat && <button onClick={()=>delDoc(d)} className="text-red-400"><X size={13}/></button>}
               </div>
             ))}
           </div>
@@ -1566,22 +1779,17 @@ function DespagubireTab({ dosar, settings, onUpdate }) {
             <Check size={14}/> Mail trimis la {fmtDate(dosar.despagubire.emailSentAt)}
           </div>
         )}
-        <div className="space-y-2">
-          {ejsOk ? (
-            <button onClick={send} disabled={status==="sending"}
-              className="w-full py-3 rounded-xl text-sm font-semibold text-white flex items-center justify-center gap-2 disabled:opacity-60"
-              style={{background:"#0f172a"}}>
-              <Send size={14}/>{status==="sending"?"Se trimite...":"Trimite cererea de despăgubire"}
-            </button>
-          ) : (
-            <div className="bg-amber-50 border border-amber-200 rounded-xl p-2.5 text-xs text-amber-700 text-center">
-              Configurează EmailJS în Setări
-            </div>
-          )}
-          <button onClick={mailto} className="w-full py-2 rounded-xl text-xs font-medium border border-slate-200 bg-white text-slate-600">
-            Deschide în app Mail (fallback)
+        {ejsOk ? (
+          <button onClick={send} disabled={status==="sending"}
+            className="w-full py-3 rounded-xl text-sm font-semibold text-white flex items-center justify-center gap-2 disabled:opacity-60"
+            style={{background:"#0f172a"}}>
+            <Send size={14}/>{status==="sending"?"Se trimite...":"Trimite cererea de despăgubire"}
           </button>
-        </div>
+        ) : (
+          <div className="bg-amber-50 border border-amber-200 rounded-xl p-2.5 text-xs text-amber-700 text-center">
+            Configurează EmailJS în Setări
+          </div>
+        )}
       </Card>
     </div>
   );
@@ -1757,9 +1965,11 @@ function SchimbTab({ dosar, onUpdate }) {
   );
 }
 
-// ─── FORM VIEW ──────────────────────────────────────────────────
+// ─── FORM VIEW (cu poze la creare) ─────────────────────────────
 function FormView({ dosar, tab, setTab, onSave, onCancel }) {
   const [d, setD] = useState({...dosar});
+  const [uploading, setUploading] = useState(false);
+  const pozeRef = useRef();
   const upd = (path,val) => setD(prev=>{
     const parts=path.split(".");
     const next={...prev}; let o=next;
@@ -1769,7 +1979,30 @@ function FormView({ dosar, tab, setTab, onSave, onCancel }) {
   const UPPERCASE = new Set(["nrDosar","masina.marca","masina.model","masina.nrInmatriculare","masina.vin","proprietar.nume","asigurator.inspector"]);
   const updS = (path) => (val) => upd(path, UPPERCASE.has(path) ? (val||"").toUpperCase() : val);
 
-  const TABS=[{id:"info",l:"General"},{id:"proprietar",l:"Proprietar"},{id:"masina",l:"Mașină"},{id:"asigurator",l:"Asigurator"}];
+  const addPoze = async (ev) => {
+    const files = Array.from(ev.target.files);
+    setUploading(true);
+    try {
+      const uploaded = await Promise.all(files.map(f => uploadFile(d.id, "dosar/poze", f)));
+      setD(p => ({ ...p, poze: [...(p.poze||[]), ...uploaded] }));
+    } catch(err) { alert("Eroare la upload: "+err.message); }
+    setUploading(false);
+    ev.target.value = "";
+  };
+
+  const delPoza = async (poza) => {
+    if (!confirm("Ștergi poza?")) return;
+    await deleteFile(poza.path);
+    setD(p => ({ ...p, poze: p.poze.filter(x => x.path !== poza.path) }));
+  };
+
+  const TABS=[
+    {id:"info",l:"General"},
+    {id:"proprietar",l:"Proprietar"},
+    {id:"masina",l:"Mașină"},
+    {id:"asigurator",l:"Asigurator"},
+    {id:"poze",l:"Poze"},
+  ];
 
   return (
     <div className="space-y-3 max-w-2xl mx-auto">
@@ -1790,7 +2023,7 @@ function FormView({ dosar, tab, setTab, onSave, onCancel }) {
             <label className="text-xs text-slate-500 mb-1.5 block font-medium">Status</label>
             <select value={d.status} onChange={e=>upd("status",e.target.value)}
               className="w-full border border-slate-200 rounded-xl px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-sky-300 bg-white">
-              {Object.entries(STATUS).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}
+              {Object.entries(STATUS).filter(([k])=>k!=="arhivat").map(([k,v])=><option key={k} value={k}>{v.label}</option>)}
             </select>
           </div>
           <FF label="Data eveniment"  type="date" v={d.dataEveniment}  set={v=>upd("dataEveniment",v)}/>
@@ -1825,6 +2058,32 @@ function FormView({ dosar, tab, setTab, onSave, onCancel }) {
           </div>
           <FF label="Inspector"         v={d.asigurator.inspector} set={updS("asigurator.inspector")}/>
           <FF label="Telefon inspector" v={d.asigurator.contact}   set={v=>upd("asigurator.contact",v)}/>
+        </>}
+        {tab==="poze" && <>
+          <div className="flex items-center justify-between mb-3">
+            <label className="text-xs text-slate-500 font-medium">Poze dosar / mașină ({(d.poze||[]).length})</label>
+            <button onClick={()=>pozeRef.current.click()} disabled={uploading} className="flex items-center gap-1 text-sky-600 text-sm font-medium disabled:opacity-50">
+              <Camera size={15}/> {uploading?"Se urcă...":"Adaugă"}
+            </button>
+          </div>
+          <input ref={pozeRef} type="file" multiple accept="image/*" className="hidden" onChange={addPoze}/>
+          {(d.poze||[]).length===0 ? (
+            <button onClick={()=>pozeRef.current.click()} disabled={uploading}
+              className="w-full py-8 border-2 border-dashed border-slate-200 rounded-xl text-slate-400 text-sm hover:bg-slate-50 disabled:opacity-50">
+              <Camera size={28} className="mx-auto mb-2"/> {uploading?"Se urcă pozele...":"Apasă pentru a adăuga poze"}
+            </button>
+          ) : (
+            <div className="grid grid-cols-3 gap-2">
+              {d.poze.map(p => (
+                <div key={p.path||p.url} className="relative aspect-square rounded-lg overflow-hidden border border-slate-100 group">
+                  <img src={p.url||p.data} alt={p.name} className="w-full h-full object-cover"/>
+                  <button onClick={()=>delPoza(p)} className="absolute top-1 right-1 bg-red-500 text-white rounded-full p-0.5 shadow-md">
+                    <X size={11}/>
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </>}
       </Card>
       <div className="flex gap-3">
