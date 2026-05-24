@@ -4,7 +4,7 @@ import {
   Mail, Camera, Trash2, Check, Clock, Edit, ArrowLeft,
   Send, Calendar, User, Building, X, Download,
   Settings, AlertCircle, ChevronDown, WifiOff, Paperclip,
-  Lock, BarChart3, ListChecks, LogOut, Package, Archive
+  Lock, BarChart3, ListChecks, LogOut, Package, Archive, HardDrive, RefreshCw
 } from "lucide-react";
 import { supabase } from "./supabase.js";
 import JSZip from "jszip";
@@ -94,7 +94,7 @@ const mkReconstatare = () => ({
 });
 
 const mkSettings = () => ({
-  emailjs:{ serviceId:"", templateId:"", publicKey:"", fromName: COMPANY.agent, fromEmail:"" },
+  fromName: COMPANY.agent,
   asiguratorEmails:{},
 });
 
@@ -143,7 +143,6 @@ const getAsigEmail = (settings, companie, tip) => {
   return e.alte||e.despagubire||e.reconstatare||"";
 };
 
-// Find first photo from any source
 const getFirstPhoto = (d) => {
   const all = [
     ...(d.poze||[]),
@@ -152,7 +151,7 @@ const getFirstPhoto = (d) => {
   return all.find(p => p.type?.startsWith("image"));
 };
 
-// ─── STORAGE ─────────────────────────────────────────────────────
+// ─── STORAGE ────────────────────────────────────────────────────
 const uploadFile = async (dosarId, folder, file) => {
   const ext = file.name.split('.').pop();
   const path = `${dosarId}/${folder}/${Date.now()}_${Math.random().toString(36).slice(2,8)}.${ext}`;
@@ -169,7 +168,40 @@ const deleteFile = async (path) => {
   await supabase.storage.from(STORAGE_BUCKET).remove([path]);
 };
 
-// Get all file paths in a dosar
+// Calculate total storage used (recursively lists all files)
+const getStorageUsage = async () => {
+  let totalSize = 0;
+  let fileCount = 0;
+
+  const listRecursive = async (prefix = '') => {
+    const { data, error } = await supabase.storage.from(STORAGE_BUCKET).list(prefix, {
+      limit: 1000,
+      sortBy: { column: 'name', order: 'asc' }
+    });
+    if (error) throw error;
+
+    for (const item of (data || [])) {
+      // folder = id is null
+      if (item.id === null || !item.metadata) {
+        await listRecursive(prefix ? `${prefix}/${item.name}` : item.name);
+      } else {
+        totalSize += item.metadata?.size || 0;
+        fileCount++;
+      }
+    }
+  };
+
+  await listRecursive();
+  return { totalSize, fileCount };
+};
+
+const formatSize = (bytes) => {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024*1024) return `${(bytes/1024).toFixed(1)} KB`;
+  if (bytes < 1024*1024*1024) return `${(bytes/(1024*1024)).toFixed(1)} MB`;
+  return `${(bytes/(1024*1024*1024)).toFixed(2)} GB`;
+};
+
 const allFilePaths = (d) => {
   const paths = [];
   (d.poze||[]).forEach(p => p.path && paths.push(p.path));
@@ -208,13 +240,18 @@ const buildDespagubireEmail = (dosar, extraText) => {
   return { subject, body };
 };
 
-const sendEmail = async (cfg, params) => {
-  if (!cfg.serviceId||!cfg.templateId||!cfg.publicKey) throw new Error("Configurare EmailJS incompletă. Mergi la Setări.");
-  const r = await fetch("https://api.emailjs.com/api/v1.0/email/send",{
-    method:"POST", headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({ service_id:cfg.serviceId, template_id:cfg.templateId, user_id:cfg.publicKey, template_params:params })
+// ─── SEND EMAIL VIA OWN BACKEND ─────────────────────────────────
+const sendEmail = async ({ to, subject, body, fromName }) => {
+  const r = await fetch("/api/send-email", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ to, subject, body, fromName }),
   });
-  if (!r.ok) throw new Error(`EmailJS: ${await r.text()||r.statusText}`);
+  const data = await r.json().catch(()=>({}));
+  if (!r.ok) {
+    throw new Error(data.error || `Eroare ${r.status}`);
+  }
+  return data;
 };
 
 // ─── DB ─────────────────────────────────────────────────────────
@@ -308,7 +345,7 @@ function LoginScreen({ onLogin }) {
 export default function App() {
   const [authed, setAuthed] = useState(() => localStorage.getItem("msm_auth") === "1");
   const [view, setView] = useState("dashboard");
-  const [listFilter, setListFilter] = useState("toate"); // toate / active / finalizate / arhivate
+  const [listFilter, setListFilter] = useState("toate");
   const [dosare, setDosare] = useState([]);
   const [settings, setSettings] = useState(mkSettings());
   const [selected, setSelected] = useState(null);
@@ -360,12 +397,9 @@ export default function App() {
   const archiveDosar = async (d) => {
     if (!confirm("Arhivare dosar:\n\n1. Se descarcă ZIP cu toate fișierele\n2. Se șterg pozele și documentele din cloud\n3. Detaliile (financiar, etape, mailuri) rămân în Rapoarte\n\nContinui?")) return;
     try {
-      // 1. Download ZIP
       await downloadDosarZip(d);
-      // 2. Delete files
       const paths = allFilePaths(d);
       if (paths.length) await supabase.storage.from(STORAGE_BUCKET).remove(paths);
-      // 3. Clean references, mark as archived
       const cleanRecons = (d.reconstatari||[]).map(r => ({ ...r, poze: [], documente: [] }));
       const cleanDespagubire = { ...(d.despagubire||{}), documente: [] };
       const archived = {
@@ -523,7 +557,6 @@ function Dashboard({ dosare, onView, onCreate, onOpenList, onRapoarte }) {
   const stats = useMemo(()=>{
     const ps = getPeriodStart(period);
     const inp = dosare.filter(d=>new Date(d.updatedAt)>=ps);
-    // Comision de incasat = total comisioane neîncasate
     const deIncasat = inp.filter(d => !d.financiar?.comisionIncasat).reduce((s,d)=>s+(d.financiar?.comision||0),0);
     return {
       total: dosare.length,
@@ -687,7 +720,7 @@ function ListaView({ filtered, search, setSearch, onView, listFilter, setListFil
   );
 }
 
-// ─── RAPOARTE VIEW ──────────────────────────────────────────────
+// ─── RAPOARTE ───────────────────────────────────────────────────
 function RapoarteView({ dosare, onUpdate, onView }) {
   const [filter, setFilter] = useState("toate");
 
@@ -907,14 +940,95 @@ function RaportRow({ d, onToggleAchitat, onToggleComision, onView, onUpdate }) {
   );
 }
 
+// ─── STORAGE USAGE ──────────────────────────────────────────────
+function StorageUsage() {
+  const [usage, setUsage] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState(null);
+
+  const load = async () => {
+    setLoading(true); setErr(null);
+    try {
+      const data = await getStorageUsage();
+      setUsage(data);
+    } catch(e) { setErr(e.message); }
+    setLoading(false);
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const MAX_BYTES = 1024 * 1024 * 1024; // 1 GB free tier
+  const percent = usage ? (usage.totalSize / MAX_BYTES) * 100 : 0;
+  const color = percent > 80 ? "#ef4444" : percent > 60 ? "#f59e0b" : "#10b981";
+  const bgColor = percent > 80 ? "#fef2f2" : percent > 60 ? "#fffbeb" : "#f0fdf4";
+
+  return (
+    <Card>
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <HardDrive size={18} className="text-slate-700"/>
+          <h3 className="font-semibold text-sm text-slate-800">Spațiu stocare</h3>
+        </div>
+        <button onClick={load} disabled={loading} className="flex items-center gap-1 text-xs text-sky-600 font-medium disabled:opacity-50">
+          <RefreshCw size={12} className={loading?"animate-spin":""}/>
+          {loading ? "Se calculează..." : "Reîncarcă"}
+        </button>
+      </div>
+
+      {err ? (
+        <div className="bg-red-50 border border-red-100 rounded-xl p-3 text-xs text-red-700">
+          {err}
+        </div>
+      ) : loading && !usage ? (
+        <div className="text-xs text-slate-400 py-4 text-center">Se calculează spațiul folosit...</div>
+      ) : usage ? (
+        <>
+          <div className="flex items-baseline justify-between mb-2">
+            <div>
+              <span className="text-2xl font-bold" style={{color}}>{formatSize(usage.totalSize)}</span>
+              <span className="text-xs text-slate-400 ml-2">/ 1 GB</span>
+            </div>
+            <span className="text-sm font-bold" style={{color}}>{percent.toFixed(1)}%</span>
+          </div>
+
+          <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
+            <div className="h-full rounded-full transition-all duration-500" style={{
+              width: `${Math.min(percent, 100)}%`,
+              background: color
+            }}/>
+          </div>
+
+          <div className="flex items-center justify-between mt-2">
+            <span className="text-[11px] text-slate-500">{usage.fileCount} fișiere stocate</span>
+            <span className="text-[11px] text-slate-500">Rămas: {formatSize(MAX_BYTES - usage.totalSize)}</span>
+          </div>
+
+          {percent > 80 && (
+            <div className="bg-red-50 border border-red-100 rounded-xl p-3 mt-3 text-xs text-red-700 flex items-start gap-2">
+              <AlertCircle size={14} className="flex-shrink-0 mt-0.5"/>
+              <span>Spațiu aproape epuizat. <strong>Arhivează dosare finalizate</strong> pentru a elibera spațiu (Detaliu dosar → Arhivează).</span>
+            </div>
+          )}
+
+          {percent > 60 && percent <= 80 && (
+            <div className="bg-amber-50 border border-amber-100 rounded-xl p-3 mt-3 text-xs text-amber-700 flex items-start gap-2">
+              <AlertCircle size={14} className="flex-shrink-0 mt-0.5"/>
+              <span>Spațiul ocupat depășește 60%. Consideră arhivarea dosarelor mai vechi.</span>
+            </div>
+          )}
+        </>
+      ) : null}
+    </Card>
+  );
+}
+
 // ─── SETTINGS ───────────────────────────────────────────────────
 function SettingsView({ settings, onSave, onLogout }) {
-  const [tab, setTab] = useState("emailjs");
-  const [s, setS] = useState({...settings, emailjs:{...settings.emailjs}, asiguratorEmails:{...settings.asiguratorEmails}});
+  const [tab, setTab] = useState("email");
+  const [s, setS] = useState({...settings, asiguratorEmails:{...settings.asiguratorEmails}});
   const [saved, setSaved] = useState(false);
 
   const save = async () => { await onSave(s); setSaved(true); setTimeout(()=>setSaved(false),1500); };
-  const updE = (k,v) => setS(p=>({...p,emailjs:{...p.emailjs,[k]:v}}));
   const updA = (a,f,v) => setS(p=>({...p,asiguratorEmails:{...p.asiguratorEmails,[a]:{...p.asiguratorEmails[a],[f]:v}}}));
 
   return (
@@ -931,22 +1045,26 @@ function SettingsView({ settings, onSave, onLogout }) {
           </button>
         </div>
       </Card>
+
+      <StorageUsage/>
+
       <div className="bg-white rounded-2xl shadow-sm p-1.5 border border-slate-100 flex gap-1">
-        {[["emailjs","Email config"],["asiguratori","Asiguratori"]].map(([k,l])=>(
+        {[["email","Email"],["asiguratori","Asiguratori"]].map(([k,l])=>(
           <button key={k} onClick={()=>setTab(k)}
             className={`flex-1 px-3 py-2 rounded-xl text-xs font-semibold transition-all ${tab===k?"text-white":"text-slate-500"}`}
             style={tab===k?{background:"#0f172a"}:{}}>{l}</button>
         ))}
       </div>
 
-      {tab==="emailjs" && (
+      {tab==="email" && (
         <Card>
-          <ST>Configurare EmailJS</ST>
-          <FF label="Service ID"      v={s.emailjs.serviceId}   set={v=>updE("serviceId",v)}   ph="service_xxxxxxx"/>
-          <FF label="Template ID"     v={s.emailjs.templateId}  set={v=>updE("templateId",v)}  ph="template_xxxxxxx"/>
-          <FF label="Public Key"      v={s.emailjs.publicKey}   set={v=>updE("publicKey",v)}   ph="aBcDeFgHiJkLmN"/>
-          <FF label="Nume expeditor"  v={s.emailjs.fromName}    set={v=>updE("fromName",v)}    ph={COMPANY.agent}/>
-          <FF label="Email expeditor" type="email" v={s.emailjs.fromEmail} set={v=>updE("fromEmail",v)} ph="contact@gmail.com"/>
+          <ST>Configurare email</ST>
+          <div className="bg-emerald-50 border border-emerald-100 rounded-xl p-3 mb-4 text-xs text-emerald-800">
+            <div className="font-semibold mb-1">✓ Email Gmail direct</div>
+            Emailurile pleacă direct din contul tău Gmail. Configurarea (adresa Gmail + parola de aplicație) se face în Vercel → Environment Variables: <code className="bg-white px-1 rounded">GMAIL_USER</code> și <code className="bg-white px-1 rounded">GMAIL_APP_PASSWORD</code>.
+          </div>
+          <FF label="Nume expeditor" v={s.fromName} set={v=>setS(p=>({...p,fromName:v}))} ph={COMPANY.agent}/>
+          <div className="text-[11px] text-slate-400 mt-1">Apare ca expeditor în emailurile trimise (înaintea adresei Gmail).</div>
         </Card>
       )}
 
@@ -985,7 +1103,7 @@ function SettingsView({ settings, onSave, onLogout }) {
   );
 }
 
-// ─── DETAIL VIEW ───────────────────────────────────────────────
+// ─── DETAIL ─────────────────────────────────────────────────────
 function DetailView({ dosar, tab, setTab, settings, onEdit, onDelete, onUpdate, onArchive, onAddRecon, onEditRecon }) {
   const s = STATUS[dosar.status]||STATUS.constatare;
   const img = getFirstPhoto(dosar);
@@ -1002,7 +1120,6 @@ function DetailView({ dosar, tab, setTab, settings, onEdit, onDelete, onUpdate, 
   return (
     <div className="lg:grid lg:grid-cols-[1fr_2fr] lg:gap-4 lg:items-start max-w-6xl mx-auto">
       <div className="space-y-3 mb-3 lg:mb-0">
-        {/* Enhanced header */}
         <Card>
           <div className="flex items-start gap-3">
             <div className="w-16 h-16 rounded-xl flex-shrink-0 overflow-hidden bg-slate-100 flex items-center justify-center border border-slate-200">
@@ -1083,7 +1200,7 @@ function DetailView({ dosar, tab, setTab, settings, onEdit, onDelete, onUpdate, 
   );
 }
 
-// ─── DOWNLOAD ZIP ───────────────────────────────────────────────
+// ─── ZIP DOWNLOAD ───────────────────────────────────────────────
 async function downloadDosarZip(dosar) {
   try {
     const zip = new JSZip();
@@ -1167,7 +1284,6 @@ function InfoTab({ dosar, onEditRecon }) {
 
   return (
     <div className="space-y-3">
-      {/* Poze dosar (dacă există) */}
       {imagini.length > 0 && (
         <Card>
           <ST>Poze dosar ({imagini.length})</ST>
@@ -1403,7 +1519,6 @@ function ReconstatareWorkflow({ dosar, recon, settings, onSave, onCancel }) {
   const companie = dosar.asigurator?.companie;
   const recipient = getAsigEmail(settings, companie, "reconstatare");
   const { subject, body } = useMemo(() => buildReconstatareEmail(dosar, e, e.emailExtra), [dosar, e]);
-  const ejsOk = settings.emailjs?.serviceId && settings.emailjs?.templateId && settings.emailjs?.publicKey;
 
   const addPiesa = () => setE(p => ({ ...p, piese: [...p.piese, { id: Date.now().toString() + Math.random(), piesa: "", solutie: "INL", solutieCustom: "" }] }));
   const updPiesa = (idx, field, val) => setE(p => ({ ...p, piese: p.piese.map((it,i) => i===idx ? { ...it, [field]: val } : it) }));
@@ -1447,10 +1562,9 @@ function ReconstatareWorkflow({ dosar, recon, settings, onSave, onCancel }) {
     if (!recipient) { setEmailStatus("error"); setEmailErr(`Adresa de reconstatare nu este salvată pentru ${companie||"acest asigurator"}.`); return; }
     setEmailStatus("sending"); setEmailErr("");
     try {
-      await sendEmail(settings.emailjs, {
-        to_email: recipient, subject, message: body,
-        from_name: settings.emailjs?.fromName || COMPANY.agent,
-        from_email: settings.emailjs?.fromEmail || ""
+      await sendEmail({
+        to: recipient, subject, body,
+        fromName: settings.fromName || COMPANY.agent,
       });
       setEmailStatus("sent");
       setE(p => ({ ...p, emailSent: true, emailSentAt: new Date().toISOString() }));
@@ -1637,17 +1751,11 @@ function ReconstatareWorkflow({ dosar, recon, settings, onSave, onCancel }) {
             <Check size={14}/> Mail trimis la {fmtDate(e.emailSentAt)}
           </div>
         )}
-        {ejsOk ? (
-          <button onClick={sendNow} disabled={emailStatus==="sending"}
-            className="w-full py-3 rounded-xl text-sm font-semibold text-white flex items-center justify-center gap-2 disabled:opacity-60"
-            style={{background:"#0f172a"}}>
-            <Send size={14}/>{emailStatus==="sending"?"Se trimite...":"Trimite mail"}
-          </button>
-        ) : (
-          <div className="bg-amber-50 border border-amber-200 rounded-xl p-2.5 text-xs text-amber-700 text-center">
-            Configurează EmailJS în Setări
-          </div>
-        )}
+        <button onClick={sendNow} disabled={emailStatus==="sending"}
+          className="w-full py-3 rounded-xl text-sm font-semibold text-white flex items-center justify-center gap-2 disabled:opacity-60"
+          style={{background:"#0f172a"}}>
+          <Send size={14}/>{emailStatus==="sending"?"Se trimite...":"Trimite mail"}
+        </button>
       </Card>
 
       <div className="flex gap-3 sticky bottom-2">
@@ -1660,7 +1768,7 @@ function ReconstatareWorkflow({ dosar, recon, settings, onSave, onCancel }) {
   );
 }
 
-// ─── DESPAGUBIRE TAB ───────────────────────────────────────────
+// ─── DESPAGUBIRE ──────────────────────────────────────────────
 function DespagubireTab({ dosar, settings, onUpdate }) {
   const [extra, setExtra] = useState(dosar.despagubire?.emailExtra || "");
   const [status, setStatus] = useState(null);
@@ -1671,7 +1779,6 @@ function DespagubireTab({ dosar, settings, onUpdate }) {
   const companie = dosar.asigurator?.companie;
   const recipient = getAsigEmail(settings, companie, "despagubire");
   const { subject, body } = useMemo(()=>buildDespagubireEmail(dosar, extra), [dosar, extra]);
-  const ejsOk = settings.emailjs?.serviceId && settings.emailjs?.templateId && settings.emailjs?.publicKey;
   const sent = dosar.despagubire?.emailSent;
   const docs = dosar.despagubire?.documente || [];
 
@@ -1696,10 +1803,9 @@ function DespagubireTab({ dosar, settings, onUpdate }) {
     if (!recipient) { setStatus("error"); setErr(`Adresa lipsește pentru ${companie}.`); return; }
     setStatus("sending"); setErr("");
     try {
-      await sendEmail(settings.emailjs, {
-        to_email: recipient, subject, message: body,
-        from_name: settings.emailjs?.fromName || COMPANY.agent,
-        from_email: settings.emailjs?.fromEmail || ""
+      await sendEmail({
+        to: recipient, subject, body,
+        fromName: settings.fromName || COMPANY.agent,
       });
       setStatus("sent");
       await onUpdate({ ...dosar, despagubire: { ...dosar.despagubire, emailExtra: extra, emailSent: true, emailSentAt: new Date().toISOString() }, status: "finalizat" });
@@ -1779,23 +1885,17 @@ function DespagubireTab({ dosar, settings, onUpdate }) {
             <Check size={14}/> Mail trimis la {fmtDate(dosar.despagubire.emailSentAt)}
           </div>
         )}
-        {ejsOk ? (
-          <button onClick={send} disabled={status==="sending"}
-            className="w-full py-3 rounded-xl text-sm font-semibold text-white flex items-center justify-center gap-2 disabled:opacity-60"
-            style={{background:"#0f172a"}}>
-            <Send size={14}/>{status==="sending"?"Se trimite...":"Trimite cererea de despăgubire"}
-          </button>
-        ) : (
-          <div className="bg-amber-50 border border-amber-200 rounded-xl p-2.5 text-xs text-amber-700 text-center">
-            Configurează EmailJS în Setări
-          </div>
-        )}
+        <button onClick={send} disabled={status==="sending"}
+          className="w-full py-3 rounded-xl text-sm font-semibold text-white flex items-center justify-center gap-2 disabled:opacity-60"
+          style={{background:"#0f172a"}}>
+          <Send size={14}/>{status==="sending"?"Se trimite...":"Trimite cererea de despăgubire"}
+        </button>
       </Card>
     </div>
   );
 }
 
-// ─── FINANCIAR TAB ─────────────────────────────────────────────
+// ─── FINANCIAR ─────────────────────────────────────────────────
 function FinanciarTab({ dosar, onUpdate }) {
   const [editing, setEditing] = useState(false);
   const [fin, setFin] = useState({...dosar.financiar,cheltuieli:[...(dosar.financiar?.cheltuieli||[])]});
@@ -1891,7 +1991,7 @@ function FBox({ l, v, c, bg }) {
   );
 }
 
-// ─── SCHIMB / RENT TAB ─────────────────────────────────────────
+// ─── SCHIMB / RENT ─────────────────────────────────────────────
 function SchimbTab({ dosar, onUpdate }) {
   const [editing, setEditing] = useState(false);
   const [s, setS] = useState({...dosar.masinaSchimb});
@@ -1965,7 +2065,7 @@ function SchimbTab({ dosar, onUpdate }) {
   );
 }
 
-// ─── FORM VIEW (cu poze la creare) ─────────────────────────────
+// ─── FORM VIEW ──────────────────────────────────────────────────
 function FormView({ dosar, tab, setTab, onSave, onCancel }) {
   const [d, setD] = useState({...dosar});
   const [uploading, setUploading] = useState(false);

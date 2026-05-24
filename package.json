@@ -1,6 +1,6 @@
 {
   "name": "msm-management-daune",
-  "version": "3.0.0",
+  "version": "4.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -13,7 +13,8 @@
     "lucide-react": "^0.383.0",
     "@supabase/supabase-js": "^2.39.0",
     "jszip": "^3.10.1",
-    "xlsx": "^0.18.5"
+    "xlsx": "^0.18.5",
+    "nodemailer": "^6.9.13"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.2.0",
