@@ -26,7 +26,6 @@ const ASIGURATORI = [
 const STATUS = {
   constatare:     { label:"Constatare",     bg:"bg-sky-100",    text:"text-sky-700",    dot:"bg-sky-500" },
   reconstatare:   { label:"Reconstatare",   bg:"bg-amber-100",  text:"text-amber-700",  dot:"bg-amber-500" },
-  in_lucru:       { label:"În lucru",       bg:"bg-indigo-100", text:"text-indigo-700", dot:"bg-indigo-500" },
   finalizat:      { label:"Finalizat",      bg:"bg-emerald-100",text:"text-emerald-700",dot:"bg-emerald-500" },
   arhivat:        { label:"Arhivat",        bg:"bg-slate-100",  text:"text-slate-600",  dot:"bg-slate-400" },
 };
@@ -73,7 +72,7 @@ const mkDosar = () => ({
     dataAvizare:"", dataRaportTotala:"", dataComandaPiesa:"", dataPrimirePiese:"",
     dataPredareMasinaSchimb:"", zileFacturabile:0, tarifZi:0, totalFacturabil:0
   },
-  poze:[], note:"",
+  poze:[], documente:[], note:"",
   arhivat: false, dataArhivare: "",
   createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
 });
@@ -205,6 +204,7 @@ const formatSize = (bytes) => {
 const allFilePaths = (d) => {
   const paths = [];
   (d.poze||[]).forEach(p => p.path && paths.push(p.path));
+  (d.documente||[]).forEach(doc => doc.path && paths.push(doc.path));
   (d.reconstatari||[]).forEach(r => {
     (r.poze||[]).forEach(p => p.path && paths.push(p.path));
     (r.documente||[]).forEach(doc => doc.path && paths.push(doc.path));
@@ -409,7 +409,7 @@ export default function App() {
       const archived = {
         ...d, arhivat: true, dataArhivare: new Date().toISOString(),
         status: "arhivat",
-        poze: [], reconstatari: cleanRecons, despagubire: cleanDespagubire
+        poze: [], documente: [], reconstatari: cleanRecons, despagubire: cleanDespagubire
       };
       await saveDosar(archived);
       alert("✓ Dosar arhivat. Detaliile rămân disponibile în Rapoarte.");
@@ -1183,7 +1183,7 @@ function DetailView({ dosar, tab, setTab, settings, onEdit, onDelete, onUpdate, 
       </div>
 
       <div className="space-y-3 min-w-0">
-        {tab==="info"         && <InfoTab dosar={dosar} onEditRecon={onEditRecon}/>}
+        {tab==="info"         && <InfoTab dosar={dosar} onEditRecon={onEditRecon} onUpdate={onUpdate}/>}
         {tab==="reconstatare" && <ReconstatareList dosar={dosar} onAdd={onAddRecon} onEdit={onEditRecon} onUpdate={onUpdate}/>}
         {tab==="rent"         && <SchimbTab dosar={dosar} onUpdate={onUpdate}/>}
         {tab==="despagubire"  && <DespagubireTab dosar={dosar} settings={settings} onUpdate={onUpdate}/>}
@@ -1241,6 +1241,10 @@ async function downloadDosarZip(dosar) {
       await fetchAndAdd(p, `poze_dosar/${p.name||"poza.jpg"}`);
     }
 
+    for (const doc of (dosar.documente||[])) {
+      await fetchAndAdd(doc, `documente_dosar/${doc.name||"document"}`);
+    }
+
     for (let i=0; i<(dosar.reconstatari||[]).length; i++) {
       const r = dosar.reconstatari[i];
       const rFolder = folder.folder(`reconstatare_${i+1}_${r.data}`);
@@ -1281,10 +1285,31 @@ async function downloadDosarZip(dosar) {
 }
 
 // ─── INFO TAB ──────────────────────────────────────────────────
-function InfoTab({ dosar, onEditRecon }) {
+function InfoTab({ dosar, onEditRecon, onUpdate }) {
   const recons = dosar.reconstatari || [];
   const [galIdx, setGalIdx] = useState(null);
+  const [uploadingDoc, setUploadingDoc] = useState(false);
+  const docRef = useRef();
   const imagini = (dosar.poze||[]).filter(p=>p.type?.startsWith("image"));
+  const documente = dosar.documente || [];
+  const blocked = dosar.arhivat;
+
+  const addDocs = async (ev) => {
+    const files = Array.from(ev.target.files);
+    setUploadingDoc(true);
+    try {
+      const uploaded = await Promise.all(files.map(f => uploadFile(dosar.id, "dosar/documente", f)));
+      await onUpdate({ ...dosar, documente: [...documente, ...uploaded] });
+    } catch(err) { alert("Eroare la upload: "+err.message); }
+    setUploadingDoc(false);
+    ev.target.value = "";
+  };
+
+  const delDoc = async (doc) => {
+    if (!confirm("Ștergi documentul?")) return;
+    await deleteFile(doc.path);
+    await onUpdate({ ...dosar, documente: documente.filter(x=>x.path!==doc.path) });
+  };
 
   return (
     <div className="space-y-3">
@@ -1304,6 +1329,39 @@ function InfoTab({ dosar, onEditRecon }) {
       {galIdx !== null && imagini[galIdx] && (
         <PhotoGallery photos={imagini} index={galIdx} onClose={()=>setGalIdx(null)} onIndex={setGalIdx}/>
       )}
+
+      {/* Documente dosar — note constatare, reconstatare, alte acte */}
+      <Card>
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2 text-slate-600">
+            <FileText size={15}/>
+            <span className="font-semibold text-xs uppercase tracking-wider">Documente dosar ({documente.length})</span>
+          </div>
+          {!blocked && (
+            <button onClick={()=>docRef.current.click()} disabled={uploadingDoc} className="flex items-center gap-1 text-sky-600 text-sm font-medium disabled:opacity-50">
+              <Paperclip size={15}/> {uploadingDoc?"Se urcă...":"Atașează"}
+            </button>
+          )}
+        </div>
+        <input ref={docRef} type="file" multiple className="hidden" onChange={addDocs}/>
+        {documente.length===0 ? (
+          <button onClick={()=>!blocked && docRef.current.click()} disabled={blocked||uploadingDoc}
+            className="w-full py-5 border-2 border-dashed border-slate-200 rounded-xl text-slate-400 text-xs hover:bg-slate-50 disabled:opacity-50 disabled:cursor-default">
+            <Paperclip size={20} className="mx-auto mb-1"/>
+            {blocked ? "Dosar arhivat" : (uploadingDoc?"Se urcă...":"Note constatare, reconstatare, alte acte")}
+          </button>
+        ) : (
+          <div className="space-y-1.5">
+            {documente.map((d) => (
+              <div key={d.path} className="flex items-center gap-2 bg-slate-50 rounded-lg px-3 py-2">
+                <FileText size={14} className="text-slate-400 flex-shrink-0"/>
+                <a href={d.url} target="_blank" rel="noreferrer" className="flex-1 text-sm text-slate-700 truncate hover:text-sky-600">{d.name}</a>
+                {!blocked && <button onClick={()=>delDoc(d)} className="text-red-400"><X size={13}/></button>}
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
 
       <Sec title="Proprietar" icon={<User size={15}/>}>
         <IR l="Nume" v={dosar.proprietar?.nume}/><IR l="Telefon" v={dosar.proprietar?.telefon}/><IR l="Email" v={dosar.proprietar?.email}/>
