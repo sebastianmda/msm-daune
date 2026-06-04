@@ -558,9 +558,16 @@ function Shell({ view, children, offline, isAdmin=true, onBack, onLogout, onSett
             <button onClick={onSearch} className="p-2 rounded-lg hover:bg-slate-700 text-slate-300" title="Caută">
               <Search size={16}/>
             </button>
-            <button onClick={onSettings} className="p-2 rounded-lg hover:bg-slate-700 text-slate-300" title="Setări">
-              <Settings size={16}/>
-            </button>
+            {isAdmin && (
+              <button onClick={onSettings} className="p-2 rounded-lg hover:bg-slate-700 text-slate-300" title="Setări">
+                <Settings size={16}/>
+              </button>
+            )}
+            {!isAdmin && (
+              <button onClick={onLogout} className="p-2 rounded-lg hover:bg-slate-700 text-slate-300" title="Deconectare">
+                <LogOut size={16}/>
+              </button>
+            )}
             {isAdmin && (
               <button onClick={onNew} className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap"
                 style={{background:"#38bdf8",color:"#0f172a"}}>

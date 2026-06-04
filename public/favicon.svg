@@ -1,0 +1,15 @@
+<svg viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#0284c7"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="56" height="56" rx="12" fill="#0f172a"/>
+  <rect x="2" y="2" width="56" height="56" rx="12" fill="none" stroke="url(#g)" stroke-width="1.5"/>
+  <text x="30" y="34" text-anchor="middle" font-weight="900" font-size="22"
+    fill="url(#g)" font-family="Arial Black, Arial, sans-serif" letter-spacing="-1">MD</text>
+  <line x1="16" y1="44" x2="44" y2="44" stroke="url(#g)" stroke-width="1.2"/>
+  <text x="30" y="52" text-anchor="middle" font-weight="600" font-size="6"
+    fill="#94a3b8" font-family="Arial, sans-serif" letter-spacing="2">DAUNE</text>
+</svg>
