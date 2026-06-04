@@ -12,7 +12,8 @@ import * as XLSX from "xlsx";
 
 // ─── CONSTANTS ──────────────────────────────────────────────────
 const COMPANY = { name: "Sistemcar SRL", agent: "Mada Sebastian" };
-const APP_PASSWORD = "Complexitate1988!";
+const APP_PASSWORD = "Complexitate1988!";   // Administrator — acces complet
+const GUEST_PASSWORD = "1985";              // Invitat — doar vizualizare
 const STORAGE_BUCKET = "msm-files";
 
 const ASIGURATORI = [
@@ -313,7 +314,12 @@ function LoginScreen({ onLogin }) {
     e?.preventDefault();
     if (pwd === APP_PASSWORD) {
       localStorage.setItem("msm_auth", "1");
-      onLogin();
+      localStorage.setItem("msm_role", "admin");
+      onLogin("admin");
+    } else if (pwd === GUEST_PASSWORD) {
+      localStorage.setItem("msm_auth", "1");
+      localStorage.setItem("msm_role", "guest");
+      onLogin("guest");
     } else {
       setErr(true); setPwd(""); setTimeout(()=>setErr(false), 1500);
     }
@@ -333,9 +339,9 @@ function LoginScreen({ onLogin }) {
             <span className="text-sm font-semibold text-slate-700">Acces restricționat</span>
           </div>
           <input type="password" value={pwd} onChange={e=>setPwd(e.target.value)}
-            placeholder="Parolă" autoFocus
+            placeholder="Cod de acces" autoFocus
             className={`w-full border rounded-xl px-3 py-3 focus:outline-none focus:ring-2 transition-all ${err?"border-red-300 ring-red-200 bg-red-50":"border-slate-200 focus:ring-sky-300"}`}/>
-          {err && <div className="text-red-500 text-xs mt-2">Parolă incorectă</div>}
+          {err && <div className="text-red-500 text-xs mt-2">Cod incorect</div>}
           <button type="submit" className="w-full mt-4 py-3 rounded-xl text-white font-semibold" style={{background:"#0f172a"}}>
             Intră în aplicație
           </button>
@@ -348,6 +354,8 @@ function LoginScreen({ onLogin }) {
 // ─── MAIN APP ────────────────────────────────────────────────────
 export default function App() {
   const [authed, setAuthed] = useState(() => localStorage.getItem("msm_auth") === "1");
+  const [role, setRole] = useState(() => localStorage.getItem("msm_role") || "admin");
+  const isAdmin = role === "admin";
   const [view, setView] = useState("dashboard");
   const [listFilter, setListFilter] = useState("toate");
   const [dosare, setDosare] = useState([]);
@@ -374,7 +382,13 @@ export default function App() {
     window.addEventListener("offline", ()=>setOffline(true));
   },[authed]);
 
+  const guestBlocked = () => {
+    if (!isAdmin) { alert("Mod vizualizare: nu ai drepturi de modificare."); return true; }
+    return false;
+  };
+
   const saveDosar = async d => {
+    if (guestBlocked()) throw new Error("Acces interzis");
     d.updatedAt = new Date().toISOString();
     try {
       await db.saveDosar(d);
@@ -385,6 +399,7 @@ export default function App() {
   };
 
   const deleteDosar = async id => {
+    if (guestBlocked()) return;
     if (!confirm("Ștergi definitiv dosarul (cu toate datele)?")) return;
     try {
       const d = dosare.find(x=>x.id===id);
@@ -399,6 +414,7 @@ export default function App() {
   };
 
   const archiveDosar = async (d) => {
+    if (guestBlocked()) return;
     if (!confirm("Arhivare dosar:\n\n1. Se descarcă ZIP cu toate fișierele\n2. Se șterg pozele și documentele din cloud\n3. Detaliile (financiar, etape, mailuri) rămân în Rapoarte\n\nContinui?")) return;
     try {
       await downloadDosarZip(d);
@@ -417,13 +433,16 @@ export default function App() {
   };
 
   const saveSettings = async s => {
+    if (guestBlocked()) return;
     try { await db.saveSettings(s); setSettings(s); }
     catch(e) { alert("Eroare la salvare setări: "+e.message); }
   };
 
   const logout = () => {
     localStorage.removeItem("msm_auth");
+    localStorage.removeItem("msm_role");
     setAuthed(false);
+    setRole("admin");
     setView("dashboard"); setSelected(null);
   };
 
@@ -448,7 +467,7 @@ export default function App() {
     return result;
   }, [dosare, listFilter, search]);
 
-  if (!authed) return <LoginScreen onLogin={()=>setAuthed(true)}/>;
+  if (!authed) return <LoginScreen onLogin={(r)=>{ setRole(r||"admin"); setAuthed(true); }}/>;
 
   if (loading) return (
     <div className="min-h-screen flex flex-col items-center justify-center gap-3" style={{background:"#0f172a"}}>
@@ -460,7 +479,7 @@ export default function App() {
   if (reconEditing && reconParentId) {
     const parentDosar = dosare.find(d=>d.id===reconParentId);
     return (
-      <Shell view="recon" offline={offline}
+      <Shell view="recon" offline={offline} isAdmin={isAdmin}
         onBack={()=>{setReconEditing(null);setReconParentId(null);}}
         onLogout={logout}
         onSettings={()=>{setView("settings");setReconEditing(null);setReconParentId(null);}}
@@ -486,18 +505,18 @@ export default function App() {
   }
 
   return (
-    <Shell view={view} offline={offline}
+    <Shell view={view} offline={offline} isAdmin={isAdmin}
       onBack={view==="dashboard"?null:()=>setView(view==="form"?(selected?"detail":"dashboard"):"dashboard")}
       onLogout={logout}
       onSettings={()=>setView("settings")}
       onSearch={()=>openList("toate")}
       onNew={openNew}>
-      {view==="dashboard" && <Dashboard dosare={dosare} onView={openView} onCreate={openNew} onOpenList={openList} onRapoarte={()=>setView("rapoarte")}/>}
-      {view==="rapoarte" && <RapoarteView dosare={dosare} onUpdate={saveDosar} onView={openView}/>}
+      {view==="dashboard" && <Dashboard dosare={dosare} onView={openView} onCreate={openNew} onOpenList={openList} onRapoarte={()=>setView("rapoarte")} isAdmin={isAdmin}/>}
+      {view==="rapoarte" && <RapoarteView dosare={dosare} onUpdate={saveDosar} onView={openView} isAdmin={isAdmin}/>}
       {view==="list" && <ListaView filtered={filtered} search={search} setSearch={setSearch} onView={openView} listFilter={listFilter} setListFilter={setListFilter}/>}
-      {view==="settings" && <SettingsView settings={settings} onSave={saveSettings} onLogout={logout}/>}
+      {view==="settings" && <SettingsView settings={settings} onSave={saveSettings} onLogout={logout} isAdmin={isAdmin}/>}
       {view==="detail" && selected && (
-        <DetailView dosar={selected} tab={tab} setTab={setTab} settings={settings}
+        <DetailView dosar={selected} tab={tab} setTab={setTab} settings={settings} isAdmin={isAdmin}
           onEdit={()=>openEdit(selected)} onDelete={()=>deleteDosar(selected.id)} onUpdate={saveDosar}
           onArchive={()=>archiveDosar(selected)}
           onAddRecon={()=>{ setReconEditing(mkReconstatare()); setReconParentId(selected.id); }}
@@ -512,7 +531,7 @@ export default function App() {
 }
 
 // ─── SHELL ──────────────────────────────────────────────────────
-function Shell({ view, children, offline, onBack, onLogout, onSettings, onSearch, onNew }) {
+function Shell({ view, children, offline, isAdmin=true, onBack, onLogout, onSettings, onSearch, onNew }) {
   return (
     <div className="min-h-screen" style={{background:"#f1f5f9",fontFamily:"'DM Sans','Segoe UI',sans-serif"}}>
       <header style={{background:"#0f172a"}} className="sticky top-0 z-50 shadow-lg">
@@ -531,16 +550,23 @@ function Shell({ view, children, offline, onBack, onLogout, onSettings, onSearch
           </div>
           <div className="flex items-center gap-1.5 flex-shrink-0">
             {offline && <WifiOff size={14} className="text-amber-400"/>}
+            {!isAdmin && (
+              <span className="hidden sm:flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-semibold bg-slate-700 text-slate-300">
+                <Lock size={10}/> Vizualizare
+              </span>
+            )}
             <button onClick={onSearch} className="p-2 rounded-lg hover:bg-slate-700 text-slate-300" title="Caută">
               <Search size={16}/>
             </button>
             <button onClick={onSettings} className="p-2 rounded-lg hover:bg-slate-700 text-slate-300" title="Setări">
               <Settings size={16}/>
             </button>
-            <button onClick={onNew} className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap"
-              style={{background:"#38bdf8",color:"#0f172a"}}>
-              <Plus size={14}/> Nou
-            </button>
+            {isAdmin && (
+              <button onClick={onNew} className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap"
+                style={{background:"#38bdf8",color:"#0f172a"}}>
+                <Plus size={14}/> Nou
+              </button>
+            )}
           </div>
         </div>
       </header>
@@ -1027,7 +1053,7 @@ function StorageUsage() {
 }
 
 // ─── SETTINGS ───────────────────────────────────────────────────
-function SettingsView({ settings, onSave, onLogout }) {
+function SettingsView({ settings, onSave, onLogout, isAdmin=true }) {
   const [tab, setTab] = useState("email");
   const [s, setS] = useState({...settings, asiguratorEmails:{...settings.asiguratorEmails}});
   const [saved, setSaved] = useState(false);
@@ -1099,16 +1125,22 @@ function SettingsView({ settings, onSave, onLogout }) {
         </div>
       )}
 
-      <button onClick={save} className="w-full py-3 rounded-2xl font-semibold text-white transition-all"
-        style={{background:saved?"#10b981":"#0f172a"}}>
-        {saved?"✓ Salvat":"Salvează setările"}
-      </button>
+      {isAdmin ? (
+        <button onClick={save} className="w-full py-3 rounded-2xl font-semibold text-white transition-all"
+          style={{background:saved?"#10b981":"#0f172a"}}>
+          {saved?"✓ Salvat":"Salvează setările"}
+        </button>
+      ) : (
+        <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3 text-xs text-slate-500 text-center flex items-center justify-center gap-2">
+          <Lock size={12}/> Mod vizualizare — setările pot fi modificate doar de administrator
+        </div>
+      )}
     </div>
   );
 }
 
 // ─── DETAIL ─────────────────────────────────────────────────────
-function DetailView({ dosar, tab, setTab, settings, onEdit, onDelete, onUpdate, onArchive, onAddRecon, onEditRecon }) {
+function DetailView({ dosar, tab, setTab, settings, isAdmin=true, onEdit, onDelete, onUpdate, onArchive, onAddRecon, onEditRecon }) {
   const s = STATUS[dosar.status]||STATUS.constatare;
   const img = getFirstPhoto(dosar);
   const TABS = [
@@ -1119,7 +1151,7 @@ function DetailView({ dosar, tab, setTab, settings, onEdit, onDelete, onUpdate, 
     {id:"financiar",   label:"Financiar",   icon:<DollarSign size={13}/>},
   ];
 
-  const isArchivable = dosar.status === "finalizat" && !dosar.arhivat;
+  const isArchivable = isAdmin && dosar.status === "finalizat" && !dosar.arhivat;
 
   return (
     <div className="lg:grid lg:grid-cols-[1fr_2fr] lg:gap-4 lg:items-start max-w-6xl mx-auto">
@@ -1145,8 +1177,8 @@ function DetailView({ dosar, tab, setTab, settings, onEdit, onDelete, onUpdate, 
               <span className={`w-1.5 h-1.5 rounded-full ${s.dot}`}></span>{s.label}
             </span>
             <div className="flex gap-2">
-              <button onClick={onEdit} className="p-2 rounded-xl bg-sky-50 text-sky-600 hover:bg-sky-100"><Edit size={15}/></button>
-              <button onClick={onDelete} className="p-2 rounded-xl bg-red-50 text-red-500 hover:bg-red-100"><Trash2 size={15}/></button>
+              {isAdmin && <button onClick={onEdit} className="p-2 rounded-xl bg-sky-50 text-sky-600 hover:bg-sky-100"><Edit size={15}/></button>}
+              {isAdmin && <button onClick={onDelete} className="p-2 rounded-xl bg-red-50 text-red-500 hover:bg-red-100"><Trash2 size={15}/></button>}
             </div>
           </div>
         </Card>
@@ -1183,11 +1215,11 @@ function DetailView({ dosar, tab, setTab, settings, onEdit, onDelete, onUpdate, 
       </div>
 
       <div className="space-y-3 min-w-0">
-        {tab==="info"         && <InfoTab dosar={dosar} onEditRecon={onEditRecon} onUpdate={onUpdate}/>}
-        {tab==="reconstatare" && <ReconstatareList dosar={dosar} onAdd={onAddRecon} onEdit={onEditRecon} onUpdate={onUpdate}/>}
-        {tab==="rent"         && <SchimbTab dosar={dosar} onUpdate={onUpdate}/>}
-        {tab==="despagubire"  && <DespagubireTab dosar={dosar} settings={settings} onUpdate={onUpdate}/>}
-        {tab==="financiar"    && <FinanciarTab dosar={dosar} onUpdate={onUpdate}/>}
+        {tab==="info"         && <InfoTab dosar={dosar} onEditRecon={onEditRecon} onUpdate={onUpdate} isAdmin={isAdmin}/>}
+        {tab==="reconstatare" && <ReconstatareList dosar={dosar} onAdd={onAddRecon} onEdit={onEditRecon} onUpdate={onUpdate} isAdmin={isAdmin}/>}
+        {tab==="rent"         && <SchimbTab dosar={dosar} onUpdate={onUpdate} isAdmin={isAdmin}/>}
+        {tab==="despagubire"  && <DespagubireTab dosar={dosar} settings={settings} onUpdate={onUpdate} isAdmin={isAdmin}/>}
+        {tab==="financiar"    && <FinanciarTab dosar={dosar} onUpdate={onUpdate} isAdmin={isAdmin}/>}
 
         <div className="lg:hidden space-y-2">
           <button onClick={()=>downloadDosarZip(dosar)} className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium bg-emerald-50 text-emerald-700">
@@ -1285,14 +1317,15 @@ async function downloadDosarZip(dosar) {
 }
 
 // ─── INFO TAB ──────────────────────────────────────────────────
-function InfoTab({ dosar, onEditRecon, onUpdate }) {
+function InfoTab({ dosar, onEditRecon, onUpdate, isAdmin=true }) {
   const recons = dosar.reconstatari || [];
   const [galIdx, setGalIdx] = useState(null);
+  const [viewDoc, setViewDoc] = useState(null);
   const [uploadingDoc, setUploadingDoc] = useState(false);
   const docRef = useRef();
   const imagini = (dosar.poze||[]).filter(p=>p.type?.startsWith("image"));
   const documente = dosar.documente || [];
-  const blocked = dosar.arhivat;
+  const blocked = dosar.arhivat || !isAdmin;
 
   const addDocs = async (ev) => {
     const files = Array.from(ev.target.files);
@@ -1330,6 +1363,8 @@ function InfoTab({ dosar, onEditRecon, onUpdate }) {
         <PhotoGallery photos={imagini} index={galIdx} onClose={()=>setGalIdx(null)} onIndex={setGalIdx}/>
       )}
 
+      {viewDoc && <DocViewer doc={viewDoc} onClose={()=>setViewDoc(null)}/>}
+
       {/* Documente dosar — note constatare, reconstatare, alte acte */}
       <Card>
         <div className="flex items-center justify-between mb-3">
@@ -1348,14 +1383,14 @@ function InfoTab({ dosar, onEditRecon, onUpdate }) {
           <button onClick={()=>!blocked && docRef.current.click()} disabled={blocked||uploadingDoc}
             className="w-full py-5 border-2 border-dashed border-slate-200 rounded-xl text-slate-400 text-xs hover:bg-slate-50 disabled:opacity-50 disabled:cursor-default">
             <Paperclip size={20} className="mx-auto mb-1"/>
-            {blocked ? "Dosar arhivat" : (uploadingDoc?"Se urcă...":"Note constatare, reconstatare, alte acte")}
+            {dosar.arhivat ? "Dosar arhivat" : !isAdmin ? "Niciun document" : (uploadingDoc?"Se urcă...":"Note constatare, reconstatare, alte acte")}
           </button>
         ) : (
           <div className="space-y-1.5">
             {documente.map((d) => (
               <div key={d.path} className="flex items-center gap-2 bg-slate-50 rounded-lg px-3 py-2">
                 <FileText size={14} className="text-slate-400 flex-shrink-0"/>
-                <a href={d.url} target="_blank" rel="noreferrer" className="flex-1 text-sm text-slate-700 truncate hover:text-sky-600">{d.name}</a>
+                <button onClick={()=>setViewDoc(d)} className="flex-1 text-left text-sm text-slate-700 truncate hover:text-sky-600">{d.name}</button>
                 {!blocked && <button onClick={()=>delDoc(d)} className="text-red-400"><X size={13}/></button>}
               </div>
             ))}
@@ -1618,10 +1653,58 @@ function PhotoGallery({ photos, index, onClose, onIndex }) {
   );
 }
 
+// ─── DOC VIEWER (deschide document în aplicație, cu X) ──────────
+function DocViewer({ doc, onClose }) {
+  const type = (doc?.type || "").toLowerCase();
+  const name = (doc?.name || "").toLowerCase();
+  const isImage = type.startsWith("image") || /\.(jpg|jpeg|png|gif|webp|bmp)$/.test(name);
+  const isPdf = type.includes("pdf") || name.endsWith(".pdf");
+
+  useEffect(() => {
+    const h = ev => { if (ev.key === "Escape") onClose(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, []);
+
+  return (
+    <div className="fixed inset-0 z-[100] bg-black/95 flex flex-col">
+      <div className="flex justify-between items-center p-4 text-white">
+        <div className="text-sm truncate flex-1 mr-3">{doc?.name}</div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <a href={doc?.url} download={doc?.name} target="_blank" rel="noreferrer"
+            className="flex items-center gap-1 px-3 py-1.5 rounded-full bg-white/10 text-xs hover:bg-white/20">
+            <Download size={13}/> Descarcă
+          </a>
+          <button onClick={onClose} className="p-2 rounded-full bg-white/10 hover:bg-white/20"><X size={18}/></button>
+        </div>
+      </div>
+
+      <div className="flex-1 flex items-center justify-center overflow-auto p-2">
+        {isImage ? (
+          <img src={doc?.url} alt={doc?.name} className="max-w-full max-h-full object-contain"/>
+        ) : isPdf ? (
+          <iframe src={doc?.url} title={doc?.name} className="w-full h-full bg-white rounded-lg" style={{minHeight:"70vh"}}/>
+        ) : (
+          <div className="text-center text-white/70 max-w-sm px-6">
+            <FileText size={48} className="mx-auto mb-4 text-white/40"/>
+            <div className="text-sm mb-1 break-all">{doc?.name}</div>
+            <div className="text-xs text-white/40 mb-5">Acest tip de fișier nu poate fi previzualizat în aplicație.</div>
+            <a href={doc?.url} download={doc?.name} target="_blank" rel="noreferrer"
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold"
+              style={{background:"#38bdf8",color:"#0f172a"}}>
+              <Download size={15}/> Descarcă fișierul
+            </a>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── RECONSTATARE LIST ─────────────────────────────────────────
-function ReconstatareList({ dosar, onAdd, onEdit, onUpdate }) {
+function ReconstatareList({ dosar, onAdd, onEdit, onUpdate, isAdmin=true }) {
   const recons = dosar.reconstatari || [];
-  const blocked = dosar.arhivat;
+  const blocked = dosar.arhivat || !isAdmin;
 
   const del = async (id) => {
     if (!confirm("Ștergi reconstatarea?")) return;
@@ -1644,7 +1727,7 @@ function ReconstatareList({ dosar, onAdd, onEdit, onUpdate }) {
         )}
       </div>
 
-      {blocked && (
+      {dosar.arhivat && (
         <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 mb-3 text-xs text-slate-600 text-center">
           Dosar arhivat — nu se pot adăuga reconstatări noi.
         </div>
@@ -1692,6 +1775,7 @@ function ReconstatareWorkflow({ dosar, recon, settings, onSave, onCancel }) {
   const [uploadingPoze, setUploadingPoze] = useState(false);
   const [uploadingDoc, setUploadingDoc] = useState(false);
   const [galIdx, setGalIdx] = useState(null);
+  const [viewDoc, setViewDoc] = useState(null);
   const pozeRef = useRef();
   const docRef = useRef();
 
@@ -1835,6 +1919,8 @@ function ReconstatareWorkflow({ dosar, recon, settings, onSave, onCancel }) {
         <PhotoGallery photos={imagini} index={galIdx} onClose={()=>setGalIdx(null)} onIndex={setGalIdx}/>
       )}
 
+      {viewDoc && <DocViewer doc={viewDoc} onClose={()=>setViewDoc(null)}/>}
+
       <Card>
         <div className="flex items-center justify-between mb-3">
           <ST>3. Listă piese</ST>
@@ -1897,7 +1983,7 @@ function ReconstatareWorkflow({ dosar, recon, settings, onSave, onCancel }) {
             {e.documente.map((d) => (
               <div key={d.path} className="flex items-center gap-2 bg-slate-50 rounded-lg px-3 py-2">
                 <FileText size={14} className="text-slate-400 flex-shrink-0"/>
-                <a href={d.url} target="_blank" rel="noreferrer" className="flex-1 text-sm text-slate-700 truncate hover:text-sky-600">{d.name}</a>
+                <button onClick={()=>setViewDoc(d)} className="flex-1 text-left text-sm text-slate-700 truncate hover:text-sky-600">{d.name}</button>
                 <button onClick={()=>delDoc(d)} className="text-red-400"><X size={13}/></button>
               </div>
             ))}
@@ -1963,11 +2049,12 @@ function ReconstatareWorkflow({ dosar, recon, settings, onSave, onCancel }) {
 }
 
 // ─── DESPAGUBIRE ──────────────────────────────────────────────
-function DespagubireTab({ dosar, settings, onUpdate }) {
+function DespagubireTab({ dosar, settings, onUpdate, isAdmin=true }) {
   const [extra, setExtra] = useState(dosar.despagubire?.emailExtra || "");
   const [status, setStatus] = useState(null);
   const [err, setErr] = useState("");
   const [uploading, setUploading] = useState(false);
+  const [viewDoc, setViewDoc] = useState(null);
   const docRef = useRef();
 
   const companie = dosar.asigurator?.companie;
@@ -2023,6 +2110,7 @@ function DespagubireTab({ dosar, settings, onUpdate }) {
 
   return (
     <div className="space-y-3">
+      {viewDoc && <DocViewer doc={viewDoc} onClose={()=>setViewDoc(null)}/>}
       <Card>
         <ST>Cerere despăgubire</ST>
         {!companie && (
@@ -2045,15 +2133,15 @@ function DespagubireTab({ dosar, settings, onUpdate }) {
         <div className="mb-3">
           <label className="text-xs text-slate-500 mb-1.5 block font-medium">Text suplimentar</label>
           <textarea value={extra} onChange={e=>setExtra(e.target.value)} onBlur={saveExtra}
-            rows={3} placeholder="Ex: justificare zile închiriere..."
-            className="w-full border border-slate-200 rounded-xl px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-sky-300 resize-none text-sm"/>
+            rows={3} placeholder="Ex: justificare zile închiriere..." readOnly={!isAdmin}
+            className="w-full border border-slate-200 rounded-xl px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-sky-300 resize-none text-sm read-only:bg-slate-50"/>
         </div>
       </Card>
 
       <Card>
         <div className="flex items-center justify-between mb-3">
           <ST>Documente atașate</ST>
-          {!dosar.arhivat && (
+          {!dosar.arhivat && isAdmin && (
             <button onClick={()=>docRef.current.click()} disabled={uploading} className="flex items-center gap-1 text-sky-600 text-sm font-medium disabled:opacity-50">
               <Paperclip size={15}/> {uploading?"Se urcă...":"Atașează"}
             </button>
@@ -2067,8 +2155,8 @@ function DespagubireTab({ dosar, settings, onUpdate }) {
             {docs.map((d) => (
               <div key={d.path} className="flex items-center gap-2 bg-slate-50 rounded-lg px-3 py-2">
                 <FileText size={14} className="text-slate-400 flex-shrink-0"/>
-                <a href={d.url} target="_blank" rel="noreferrer" className="flex-1 text-sm text-slate-700 truncate hover:text-sky-600">{d.name}</a>
-                {!dosar.arhivat && <button onClick={()=>delDoc(d)} className="text-red-400"><X size={13}/></button>}
+                <button onClick={()=>setViewDoc(d)} className="flex-1 text-left text-sm text-slate-700 truncate hover:text-sky-600">{d.name}</button>
+                {!dosar.arhivat && isAdmin && <button onClick={()=>delDoc(d)} className="text-red-400"><X size={13}/></button>}
               </div>
             ))}
           </div>
@@ -2091,18 +2179,24 @@ function DespagubireTab({ dosar, settings, onUpdate }) {
             <Check size={14}/> Mail trimis la {fmtDate(dosar.despagubire.emailSentAt)}
           </div>
         )}
-        <button onClick={send} disabled={status==="sending"}
-          className="w-full py-3 rounded-xl text-sm font-semibold text-white flex items-center justify-center gap-2 disabled:opacity-60"
-          style={{background:"#0f172a"}}>
-          <Send size={14}/>{status==="sending"?"Se trimite...":"Trimite cererea de despăgubire"}
-        </button>
+        {isAdmin ? (
+          <button onClick={send} disabled={status==="sending"}
+            className="w-full py-3 rounded-xl text-sm font-semibold text-white flex items-center justify-center gap-2 disabled:opacity-60"
+            style={{background:"#0f172a"}}>
+            <Send size={14}/>{status==="sending"?"Se trimite...":"Trimite cererea de despăgubire"}
+          </button>
+        ) : (
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-500 text-center flex items-center justify-center gap-2">
+            <Lock size={12}/> Mod vizualizare — trimiterea e disponibilă doar pentru administrator
+          </div>
+        )}
       </Card>
     </div>
   );
 }
 
 // ─── FINANCIAR ─────────────────────────────────────────────────
-function FinanciarTab({ dosar, onUpdate }) {
+function FinanciarTab({ dosar, onUpdate, isAdmin=true }) {
   const [editing, setEditing] = useState(false);
   const [fin, setFin] = useState({...dosar.financiar,cheltuieli:[...(dosar.financiar?.cheltuieli||[])]});
   const [ch, setCh] = useState({descriere:"",suma:""});
@@ -2121,8 +2215,8 @@ function FinanciarTab({ dosar, onUpdate }) {
     <Card>
       <div className="flex items-center justify-between mb-4">
         <ST>Financiar</ST>
-        <button onClick={()=>{setFin({...dosar.financiar,cheltuieli:[...(dosar.financiar?.cheltuieli||[])]});setEditing(!editing);}}
-          className="flex items-center gap-1 text-sky-600 text-sm font-medium"><Edit size={14}/>{editing?"Anulează":"Editează"}</button>
+        {isAdmin && <button onClick={()=>{setFin({...dosar.financiar,cheltuieli:[...(dosar.financiar?.cheltuieli||[])]});setEditing(!editing);}}
+          className="flex items-center gap-1 text-sky-600 text-sm font-medium"><Edit size={14}/>{editing?"Anulează":"Editează"}</button>}
       </div>
 
       {editing ? (
@@ -2198,7 +2292,7 @@ function FBox({ l, v, c, bg }) {
 }
 
 // ─── SCHIMB / RENT ─────────────────────────────────────────────
-function SchimbTab({ dosar, onUpdate }) {
+function SchimbTab({ dosar, onUpdate, isAdmin=true }) {
   const [editing, setEditing] = useState(false);
   const [s, setS] = useState({...dosar.masinaSchimb});
   const zile = calcZile(s, dosar);
@@ -2217,8 +2311,8 @@ function SchimbTab({ dosar, onUpdate }) {
     <Card>
       <div className="flex items-center justify-between mb-4">
         <ST>Mașină la schimb (Rent)</ST>
-        <button onClick={()=>{setS({...dosar.masinaSchimb});setEditing(!editing);}}
-          className="flex items-center gap-1 text-sky-600 text-sm font-medium"><Edit size={14}/>{editing?"Anulează":"Editează"}</button>
+        {isAdmin && <button onClick={()=>{setS({...dosar.masinaSchimb});setEditing(!editing);}}
+          className="flex items-center gap-1 text-sky-600 text-sm font-medium"><Edit size={14}/>{editing?"Anulează":"Editează"}</button>}
       </div>
       {editing ? (
         <div className="space-y-3">
