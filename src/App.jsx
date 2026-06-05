@@ -4,7 +4,7 @@ import {
   Mail, Camera, Trash2, Check, Clock, Edit, ArrowLeft,
   Send, Calendar, User, Building, X, Download,
   Settings, AlertCircle, ChevronDown, WifiOff, Paperclip,
-  Lock, BarChart3, ListChecks, LogOut, Package, Archive, HardDrive, RefreshCw, Sparkles
+  Lock, BarChart3, ListChecks, LogOut, Package, Archive, HardDrive, RefreshCw, Sparkles, Star
 } from "lucide-react";
 import { supabase } from "./supabase.js";
 import JSZip from "jszip";
@@ -642,15 +642,6 @@ function Dashboard({ dosare, onView, onCreate, onOpenList, onRapoarte }) {
         </button>
       </div>
 
-      <Card>
-        <div className="text-[10px] text-slate-400 uppercase tracking-wider mb-1">Comision de încasat</div>
-        <div className="text-2xl font-bold text-emerald-600 mb-3">{stats.deIncasat.toFixed(0)} lei</div>
-        <select value={period} onChange={e=>setPeriod(e.target.value)}
-          className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-sky-300">
-          {PERIOD_OPTS.map(p=><option key={p.key} value={p.key}>{p.label}</option>)}
-        </select>
-      </Card>
-
       {stats.arhivate > 0 && (
         <button onClick={()=>onOpenList("arhivate")} className="w-full bg-white rounded-2xl shadow-sm p-3 border border-slate-100 flex items-center justify-between hover:bg-slate-50">
           <div className="flex items-center gap-2.5">
@@ -697,6 +688,15 @@ function Dashboard({ dosare, onView, onCreate, onOpenList, onRapoarte }) {
         ) : (
           <div className="space-y-2">{recente.map(d=><DosarRow key={d.id} d={d} onClick={()=>onView(d)}/>)}</div>
         )}
+      </Card>
+
+      <Card>
+        <div className="text-[10px] text-slate-400 uppercase tracking-wider mb-1">Comision de încasat</div>
+        <div className="text-2xl font-bold text-emerald-600 mb-3">{stats.deIncasat.toFixed(0)} lei</div>
+        <select value={period} onChange={e=>setPeriod(e.target.value)}
+          className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-sky-300">
+          {PERIOD_OPTS.map(p=><option key={p.key} value={p.key}>{p.label}</option>)}
+        </select>
       </Card>
     </div>
   );
@@ -1391,7 +1391,7 @@ function InfoTab({ dosar, onEditRecon, onUpdate, isAdmin=true }) {
         <Card>
           <div className="flex items-center justify-between mb-3">
             <ST>Poze dosar ({imagini.length})</ST>
-            {!blocked && <span className="text-[10px] text-slate-400">⭐ = imagine principală</span>}
+            <span className="text-[10px] text-slate-400">Apasă o poză pentru a o mări</span>
           </div>
           <div className="grid grid-cols-3 gap-2">
             {imagini.map((p, idx) => {
@@ -1399,25 +1399,18 @@ function InfoTab({ dosar, onEditRecon, onUpdate, isAdmin=true }) {
                 ? dosar.pozaPrincipala === p.path
                 : idx === 0;
               return (
-                <div key={p.path||p.url} className="relative aspect-square rounded-lg overflow-hidden border border-slate-100 group">
+                <div key={p.path||p.url} className="relative aspect-square rounded-lg overflow-hidden border border-slate-100">
                   <img src={p.url||p.data} alt={p.name} className="w-full h-full object-cover cursor-pointer"
                     onClick={()=>setGalIdx(idx)}/>
                   {ePrincipala && (
-                    <div className="absolute top-1 left-1 bg-amber-400 text-white rounded-full w-5 h-5 flex items-center justify-center shadow-md text-[11px]" title="Imagine principală">
-                      ⭐
+                    <div className="absolute top-1 left-1 bg-black/40 rounded-full w-6 h-6 flex items-center justify-center backdrop-blur-sm" title="Imagine principală">
+                      <Star size={13} fill="#fbbf24" color="#fbbf24"/>
                     </div>
                   )}
                   {!blocked && (
-                    <div className="absolute inset-x-0 bottom-0 flex">
-                      {!ePrincipala && (
-                        <button onClick={(e)=>{e.stopPropagation();setPrincipala(p);}}
-                          className="flex-1 bg-black/60 text-white text-[10px] py-1 hover:bg-amber-500"
-                          title="Setează ca principală">⭐ Principală</button>
-                      )}
-                      <button onClick={(e)=>{e.stopPropagation();delPoza(p);}}
-                        className="px-2 bg-red-500/80 text-white py-1 hover:bg-red-600"
-                        title="Șterge poza"><X size={12}/></button>
-                    </div>
+                    <button onClick={(e)=>{e.stopPropagation();delPoza(p);}}
+                      className="absolute top-1 right-1 bg-black/40 text-white rounded-full p-1 backdrop-blur-sm hover:bg-red-500/80"
+                      title="Șterge poza"><X size={12}/></button>
                   )}
                 </div>
               );
@@ -1427,7 +1420,9 @@ function InfoTab({ dosar, onEditRecon, onUpdate, isAdmin=true }) {
       )}
 
       {galIdx !== null && imagini[galIdx] && (
-        <PhotoGallery photos={imagini} index={galIdx} onClose={()=>setGalIdx(null)} onIndex={setGalIdx}/>
+        <PhotoGallery photos={imagini} index={galIdx} onClose={()=>setGalIdx(null)} onIndex={setGalIdx}
+          onSetPrincipala={blocked ? null : async (p)=>{ await setPrincipala(p); }}
+          principalaPath={dosar.pozaPrincipala}/>
       )}
 
       {viewDoc && <DocViewer doc={viewDoc} onClose={()=>setViewDoc(null)}/>}
@@ -1556,7 +1551,7 @@ function IR({ l, v }) {
 }
 
 // ─── PHOTO GALLERY (cu zoom & pan) ─────────────────────────────
-function PhotoGallery({ photos, index, onClose, onIndex }) {
+function PhotoGallery({ photos, index, onClose, onIndex, onSetPrincipala, principalaPath }) {
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const imgRef = useRef(null);
@@ -1671,6 +1666,16 @@ function PhotoGallery({ photos, index, onClose, onIndex }) {
               {zoom.toFixed(1)}× • Reset
             </button>
           )}
+          {onSetPrincipala && (() => {
+            const cur = photos[index];
+            const ePrincipala = principalaPath ? principalaPath === cur.path : index === 0;
+            return (
+              <button onClick={()=>onSetPrincipala(cur)} title={ePrincipala?"Imagine principală":"Setează ca principală"}
+                className="p-2 rounded-full bg-white/10 hover:bg-white/20 transition-colors">
+                <Star size={18} fill={ePrincipala ? "#fbbf24" : "none"} color={ePrincipala ? "#fbbf24" : "#fff"}/>
+              </button>
+            );
+          })()}
           <button onClick={onClose} className="p-2 rounded-full bg-white/10"><X size={18}/></button>
         </div>
       </div>
@@ -2726,22 +2731,32 @@ function FormView({ dosar, tab, setTab, onSave, onCancel }) {
               <Camera size={15}/> {uploading?"Se urcă...":"Adaugă"}
             </button>
           </div>
-          <input ref={pozeRef} type="file" multiple accept="image/*" className="hidden" onChange={addPoze}/>
+          <input ref={pozeRef} type="file" multiple accept="image/*,application/pdf" className="hidden" onChange={addPoze}/>
           {(d.poze||[]).length===0 ? (
             <button onClick={()=>pozeRef.current.click()} disabled={uploading}
               className="w-full py-8 border-2 border-dashed border-slate-200 rounded-xl text-slate-400 text-sm hover:bg-slate-50 disabled:opacity-50">
-              <Camera size={28} className="mx-auto mb-2"/> {uploading?"Se urcă pozele...":"Apasă pentru a adăuga poze"}
+              <Camera size={28} className="mx-auto mb-2"/> {uploading?"Se urcă...":"Apasă pentru a adăuga poze sau PDF"}
             </button>
           ) : (
             <div className="grid grid-cols-3 gap-2">
-              {d.poze.map(p => (
-                <div key={p.path||p.url} className="relative aspect-square rounded-lg overflow-hidden border border-slate-100 group">
-                  <img src={p.url||p.data} alt={p.name} className="w-full h-full object-cover"/>
-                  <button onClick={()=>delPoza(p)} className="absolute top-1 right-1 bg-red-500 text-white rounded-full p-0.5 shadow-md">
-                    <X size={11}/>
-                  </button>
-                </div>
-              ))}
+              {d.poze.map(p => {
+                const ePdf = (p.type||"").includes("pdf") || (p.name||"").toLowerCase().endsWith(".pdf");
+                return (
+                  <div key={p.path||p.url} className="relative aspect-square rounded-lg overflow-hidden border border-slate-100 group bg-slate-50">
+                    {ePdf ? (
+                      <div className="w-full h-full flex flex-col items-center justify-center p-1 text-slate-400">
+                        <FileText size={28}/>
+                        <span className="text-[9px] mt-1 text-center truncate w-full px-1">{p.name}</span>
+                      </div>
+                    ) : (
+                      <img src={p.url||p.data} alt={p.name} className="w-full h-full object-cover"/>
+                    )}
+                    <button onClick={()=>delPoza(p)} className="absolute top-1 right-1 bg-red-500 text-white rounded-full p-0.5 shadow-md">
+                      <X size={11}/>
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           )}
 
