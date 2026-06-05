@@ -4,7 +4,7 @@ import {
   Mail, Camera, Trash2, Check, Clock, Edit, ArrowLeft,
   Send, Calendar, User, Building, X, Download,
   Settings, AlertCircle, ChevronDown, WifiOff, Paperclip,
-  Lock, BarChart3, ListChecks, LogOut, Package, Archive, HardDrive, RefreshCw
+  Lock, BarChart3, ListChecks, LogOut, Package, Archive, HardDrive, RefreshCw, Sparkles
 } from "lucide-react";
 import { supabase } from "./supabase.js";
 import JSZip from "jszip";
@@ -143,12 +143,32 @@ const getAsigEmail = (settings, companie, tip) => {
   return e.alte||e.despagubire||e.reconstatare||"";
 };
 
+// Încearcă să potrivească numele asiguratorului din document cu lista predefinită
+const matchAsigurator = (name) => {
+  if (!name) return "";
+  const q = name.toLowerCase().trim();
+  // Match exact
+  const exact = ASIGURATORI.find(a => q.includes(a.toLowerCase()));
+  if (exact) return exact;
+  // Match pe primul cuvânt semnificativ (min 4 litere)
+  const partial = ASIGURATORI.find(a =>
+    a.toLowerCase().split(/[\s\-\/]/).filter(w=>w.length>=4).some(w => q.includes(w))
+  );
+  return partial || "";
+};
+
 const getFirstPhoto = (d) => {
   const all = [
     ...(d.poze||[]),
     ...((d.reconstatari||[]).flatMap(r => r.poze||[]))
   ];
-  return all.find(p => p.type?.startsWith("image"));
+  const images = all.filter(p => p.type?.startsWith("image"));
+  // Dacă există o poză principală aleasă, o folosim
+  if (d.pozaPrincipala) {
+    const chosen = images.find(p => p.path === d.pozaPrincipala);
+    if (chosen) return chosen;
+  }
+  return images[0];
 };
 
 // ─── STORAGE ────────────────────────────────────────────────────
@@ -425,7 +445,7 @@ export default function App() {
       const archived = {
         ...d, arhivat: true, dataArhivare: new Date().toISOString(),
         status: "arhivat",
-        poze: [], documente: [], reconstatari: cleanRecons, despagubire: cleanDespagubire
+        poze: [], documente: [], pozaPrincipala: "", reconstatari: cleanRecons, despagubire: cleanDespagubire
       };
       await saveDosar(archived);
       alert("✓ Dosar arhivat. Detaliile rămân disponibile în Rapoarte.");
@@ -711,12 +731,12 @@ function DosarRow({ d, onClick }) {
         </div>
         <div className="flex items-center gap-2 mt-1">
           {d.masina?.nrInmatriculare && (
-            <span className="text-[11px] px-1.5 py-0.5 rounded bg-slate-900 text-white font-bold tracking-wider">
+            <span className="text-[11px] px-1.5 py-0.5 rounded bg-slate-900 text-white font-bold tracking-wider flex-shrink-0">
               {d.masina.nrInmatriculare}
             </span>
           )}
-          <span className="text-xs text-slate-400 truncate">
-            {[d.proprietar?.nume,d.asigurator?.companie].filter(Boolean).join(" · ")}
+          <span className="text-xs text-slate-500 font-medium truncate">
+            {[`${d.masina?.marca||""} ${d.masina?.model||""}`.trim(), d.asigurator?.companie].filter(Boolean).join(" · ")}
           </span>
         </div>
       </div>
@@ -1351,17 +1371,57 @@ function InfoTab({ dosar, onEditRecon, onUpdate, isAdmin=true }) {
     await onUpdate({ ...dosar, documente: documente.filter(x=>x.path!==doc.path) });
   };
 
+  const setPrincipala = async (poza) => {
+    await onUpdate({ ...dosar, pozaPrincipala: poza.path });
+  };
+
+  const delPoza = async (poza) => {
+    if (!confirm("Ștergi poza din dosar?")) return;
+    await deleteFile(poza.path);
+    const newPoze = (dosar.poze||[]).filter(x => x.path !== poza.path);
+    const patch = { ...dosar, poze: newPoze };
+    // dacă era poza principală, resetăm
+    if (dosar.pozaPrincipala === poza.path) patch.pozaPrincipala = "";
+    await onUpdate(patch);
+  };
+
   return (
     <div className="space-y-3">
       {imagini.length > 0 && (
         <Card>
-          <ST>Poze dosar ({imagini.length})</ST>
-          <div className="grid grid-cols-4 gap-2">
-            {imagini.map((p, idx) => (
-              <button key={p.path||p.url} onClick={()=>setGalIdx(idx)} className="relative aspect-square rounded-lg overflow-hidden border border-slate-100 hover:opacity-80">
-                <img src={p.url||p.data} alt={p.name} className="w-full h-full object-cover"/>
-              </button>
-            ))}
+          <div className="flex items-center justify-between mb-3">
+            <ST>Poze dosar ({imagini.length})</ST>
+            {!blocked && <span className="text-[10px] text-slate-400">⭐ = imagine principală</span>}
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+            {imagini.map((p, idx) => {
+              const ePrincipala = dosar.pozaPrincipala
+                ? dosar.pozaPrincipala === p.path
+                : idx === 0;
+              return (
+                <div key={p.path||p.url} className="relative aspect-square rounded-lg overflow-hidden border border-slate-100 group">
+                  <img src={p.url||p.data} alt={p.name} className="w-full h-full object-cover cursor-pointer"
+                    onClick={()=>setGalIdx(idx)}/>
+                  {ePrincipala && (
+                    <div className="absolute top-1 left-1 bg-amber-400 text-white rounded-full w-5 h-5 flex items-center justify-center shadow-md text-[11px]" title="Imagine principală">
+                      ⭐
+                    </div>
+                  )}
+                  {!blocked && (
+                    <div className="absolute inset-x-0 bottom-0 flex">
+                      {!ePrincipala && (
+                        <button onClick={(e)=>{e.stopPropagation();setPrincipala(p);}}
+                          className="flex-1 bg-black/60 text-white text-[10px] py-1 hover:bg-amber-500"
+                          title="Setează ca principală">⭐ Principală</button>
+                      )}
+                      <button onClick={(e)=>{e.stopPropagation();delPoza(p);}}
+                        className="px-2 bg-red-500/80 text-white py-1 hover:bg-red-600"
+                        title="Șterge poza"><X size={12}/></button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </Card>
       )}
@@ -2376,7 +2436,16 @@ function SchimbTab({ dosar, onUpdate, isAdmin=true }) {
 function FormView({ dosar, tab, setTab, onSave, onCancel }) {
   const [d, setD] = useState({...dosar});
   const [uploading, setUploading] = useState(false);
+  const [uploadingDocForm, setUploadingDocForm] = useState(false);
+  // AI extraction state
+  const [extracting, setExtracting] = useState(false);
+  const [extractDone, setExtractDone] = useState(false);
+  const [extractErr, setExtractErr] = useState(null);
+  const [extractedFields, setExtractedFields] = useState([]);
+  const notaRef = useRef();
   const pozeRef = useRef();
+  const docFormRef = useRef();
+
   const upd = (path,val) => setD(prev=>{
     const parts=path.split(".");
     const next={...prev}; let o=next;
@@ -2385,6 +2454,106 @@ function FormView({ dosar, tab, setTab, onSave, onCancel }) {
   });
   const UPPERCASE = new Set(["nrDosar","masina.marca","masina.model","masina.nrInmatriculare","masina.vin","proprietar.nume","asigurator.inspector"]);
   const updS = (path) => (val) => upd(path, UPPERCASE.has(path) ? (val||"").toUpperCase() : val);
+
+  const handleExtract = async (ev) => {
+    const file = ev.target.files?.[0];
+    if (!file) return;
+    ev.target.value = "";
+
+    if (file.size > 9 * 1024 * 1024) {
+      setExtractErr("Fișierul e prea mare (max 9 MB). Fă o poză la rezoluție mai mică.");
+      return;
+    }
+
+    setExtracting(true);
+    setExtractErr(null);
+    setExtractDone(false);
+    setExtractedFields([]);
+
+    try {
+      // Citim fișierul ca base64
+      const base64 = await new Promise((res, rej) => {
+        const reader = new FileReader();
+        reader.onload = () => res(reader.result.split(",")[1]);
+        reader.onerror = rej;
+        reader.readAsDataURL(file);
+      });
+
+      const r = await fetch("/api/extract-constatare", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data: base64, mediaType: file.type }),
+      });
+
+      const result = await r.json();
+      if (!r.ok || !result.success) throw new Error(result.error || "Eroare necunoscută");
+
+      const ex = result.data;
+      const filled = [];
+
+      setD(prev => {
+        const next = { ...prev };
+
+        if (ex.nrDosar?.trim()) {
+          next.nrDosar = ex.nrDosar.trim().toUpperCase();
+          filled.push("Nr. dosar");
+        }
+        if (ex.dataEveniment?.trim()) {
+          next.dataEveniment = ex.dataEveniment.trim();
+          filled.push("Data eveniment");
+        }
+        if (ex.dataConstatare?.trim()) {
+          next.dataConstatare = ex.dataConstatare.trim();
+          filled.push("Data constatare");
+        }
+        if (ex.proprietar?.nume?.trim()) {
+          next.proprietar = { ...next.proprietar, nume: ex.proprietar.nume.trim().toUpperCase() };
+          filled.push("Proprietar");
+        }
+        if (ex.proprietar?.telefon?.trim()) {
+          next.proprietar = { ...next.proprietar, telefon: ex.proprietar.telefon.trim() };
+        }
+        if (ex.proprietar?.email?.trim()) {
+          next.proprietar = { ...next.proprietar, email: ex.proprietar.email.trim() };
+        }
+        if (ex.masina?.marca?.trim()) {
+          next.masina = { ...next.masina, marca: ex.masina.marca.trim().toUpperCase() };
+          filled.push("Mașină");
+        }
+        if (ex.masina?.model?.trim()) {
+          next.masina = { ...next.masina, model: ex.masina.model.trim().toUpperCase() };
+        }
+        if (ex.masina?.an?.trim()) {
+          next.masina = { ...next.masina, an: ex.masina.an.trim() };
+        }
+        if (ex.masina?.nrInmatriculare?.trim()) {
+          next.masina = { ...next.masina, nrInmatriculare: ex.masina.nrInmatriculare.trim().toUpperCase() };
+        }
+        if (ex.masina?.vin?.trim()) {
+          next.masina = { ...next.masina, vin: ex.masina.vin.trim().toUpperCase() };
+        }
+        const comp = matchAsigurator(ex.asigurator?.companie);
+        if (comp) {
+          next.asigurator = { ...next.asigurator, companie: comp };
+          filled.push("Asigurator");
+        }
+        if (ex.asigurator?.inspector?.trim()) {
+          next.asigurator = { ...next.asigurator, inspector: ex.asigurator.inspector.trim().toUpperCase() };
+        }
+        if (ex.asigurator?.contact?.trim()) {
+          next.asigurator = { ...next.asigurator, contact: ex.asigurator.contact.trim() };
+        }
+
+        return next;
+      });
+
+      setExtractedFields(filled);
+      setExtractDone(true);
+    } catch(err) {
+      setExtractErr(err.message || "Nu s-au putut citi datele. Încearcă cu o poză mai clară.");
+    }
+    setExtracting(false);
+  };
 
   const addPoze = async (ev) => {
     const files = Array.from(ev.target.files);
@@ -2401,6 +2570,23 @@ function FormView({ dosar, tab, setTab, onSave, onCancel }) {
     if (!confirm("Ștergi poza?")) return;
     await deleteFile(poza.path);
     setD(p => ({ ...p, poze: p.poze.filter(x => x.path !== poza.path) }));
+  };
+
+  const addDocsForm = async (ev) => {
+    const files = Array.from(ev.target.files);
+    setUploadingDocForm(true);
+    try {
+      const uploaded = await Promise.all(files.map(f => uploadFile(d.id, "dosar/documente", f)));
+      setD(p => ({ ...p, documente: [...(p.documente||[]), ...uploaded] }));
+    } catch(err) { alert("Eroare la upload: "+err.message); }
+    setUploadingDocForm(false);
+    ev.target.value = "";
+  };
+
+  const delDocForm = async (doc) => {
+    if (!confirm("Ștergi documentul?")) return;
+    await deleteFile(doc.path);
+    setD(p => ({ ...p, documente: (p.documente||[]).filter(x => x.path !== doc.path) }));
   };
 
   const TABS=[
@@ -2425,6 +2611,73 @@ function FormView({ dosar, tab, setTab, onSave, onCancel }) {
       </div>
       <Card>
         {tab==="info" && <>
+          {/* ─── COMPLETARE AUTOMATĂ AI ─── */}
+          <input ref={notaRef} type="file" accept="image/*,application/pdf" className="hidden" onChange={handleExtract}/>
+
+          <div className="rounded-xl border mb-4 overflow-hidden"
+            style={{background: extractDone ? "#f0fdf4" : "#f0f9ff", borderColor: extractDone ? "#bbf7d0" : "#bae6fd"}}>
+            <div className="px-4 pt-3 pb-2">
+              <div className="flex items-center gap-2 mb-1">
+                <Sparkles size={15} style={{color: extractDone ? "#16a34a" : "#0284c7"}}/>
+                <span className="font-semibold text-sm text-slate-700">Completare automată din notă</span>
+              </div>
+              <p className="text-xs text-slate-500">
+                Atașează nota de constatare (PDF sau poză) și câmpurile se completează singure.
+              </p>
+            </div>
+
+            <div className="px-4 pb-3">
+              {!extracting && !extractDone && !extractErr && (
+                <button onClick={()=>notaRef.current?.click()}
+                  className="w-full flex items-center justify-center gap-2 py-2.5 border-2 border-dashed rounded-xl text-sm font-medium transition-colors hover:opacity-80"
+                  style={{borderColor:"#7dd3fc", color:"#0284c7", background:"#e0f2fe"}}>
+                  <Paperclip size={15}/> Atașează notă de constatare
+                </button>
+              )}
+
+              {extracting && (
+                <div className="flex items-center justify-center gap-3 py-2.5">
+                  <div className="w-5 h-5 rounded-full border-2 border-sky-400 border-t-transparent animate-spin"/>
+                  <span className="text-sm text-sky-700 font-medium">Se citește documentul...</span>
+                </div>
+              )}
+
+              {extractDone && (
+                <div className="space-y-2">
+                  <div className="flex items-start gap-2">
+                    <Check size={15} className="text-emerald-600 flex-shrink-0 mt-0.5"/>
+                    <div className="flex-1">
+                      <div className="text-xs font-semibold text-emerald-700">
+                        {extractedFields.length > 0
+                          ? `Date extrase: ${extractedFields.join(", ")}`
+                          : "Document citit — verifică câmpurile"}
+                      </div>
+                      <div className="text-[11px] text-slate-400 mt-0.5">Verifică și corectează dacă e necesar</div>
+                    </div>
+                  </div>
+                  <button onClick={()=>{setExtractDone(false);setExtractErr(null);setExtractedFields([]);notaRef.current?.click();}}
+                    className="text-xs text-sky-600 underline">
+                    Încarcă alt document
+                  </button>
+                </div>
+              )}
+
+              {extractErr && (
+                <div className="space-y-2">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle size={14} className="text-red-500 flex-shrink-0 mt-0.5"/>
+                    <span className="text-xs text-red-700">{extractErr}</span>
+                  </div>
+                  <button onClick={()=>{setExtractErr(null);notaRef.current?.click();}}
+                    className="text-xs text-sky-600 underline">
+                    Încearcă din nou
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+          {/* ─────────────────────────────── */}
+
           <FF label="Nr. dosar *" v={d.nrDosar} set={updS("nrDosar")}/>
           <div className="mb-3">
             <label className="text-xs text-slate-500 mb-1.5 block font-medium">Status</label>
@@ -2491,6 +2744,33 @@ function FormView({ dosar, tab, setTab, onSave, onCancel }) {
               ))}
             </div>
           )}
+
+          {/* Documente (notă constatare, acte) */}
+          <div className="border-t border-slate-100 mt-4 pt-4">
+            <div className="flex items-center justify-between mb-3">
+              <label className="text-xs text-slate-500 font-medium">Documente — notă constatare, acte ({(d.documente||[]).length})</label>
+              <button onClick={()=>docFormRef.current.click()} disabled={uploadingDocForm} className="flex items-center gap-1 text-sky-600 text-sm font-medium disabled:opacity-50">
+                <Paperclip size={15}/> {uploadingDocForm?"Se urcă...":"Atașează"}
+              </button>
+            </div>
+            <input ref={docFormRef} type="file" multiple accept="image/*,application/pdf,.doc,.docx" className="hidden" onChange={addDocsForm}/>
+            {(d.documente||[]).length===0 ? (
+              <button onClick={()=>docFormRef.current.click()} disabled={uploadingDocForm}
+                className="w-full py-6 border-2 border-dashed border-slate-200 rounded-xl text-slate-400 text-xs hover:bg-slate-50 disabled:opacity-50">
+                <Paperclip size={22} className="mx-auto mb-1"/> {uploadingDocForm?"Se urcă...":"Notă constatare sau alte documente cu care vine mașina"}
+              </button>
+            ) : (
+              <div className="space-y-1.5">
+                {d.documente.map(doc => (
+                  <div key={doc.path} className="flex items-center gap-2 bg-slate-50 rounded-lg px-3 py-2">
+                    <FileText size={14} className="text-slate-400 flex-shrink-0"/>
+                    <span className="flex-1 text-sm text-slate-700 truncate">{doc.name}</span>
+                    <button onClick={()=>delDocForm(doc)} className="text-red-400"><X size={13}/></button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </>}
       </Card>
       <div className="flex gap-3">

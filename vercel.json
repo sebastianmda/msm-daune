@@ -2,6 +2,9 @@
   "functions": {
     "api/send-email.js": {
       "maxDuration": 60
+    },
+    "api/extract-constatare.js": {
+      "maxDuration": 30
     }
   }
 }
