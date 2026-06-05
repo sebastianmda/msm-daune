@@ -106,6 +106,26 @@ const fmtDate = s => {
 
 const today = () => new Date().toISOString().split("T")[0];
 
+// Câte zile au trecut de la o dată (pozitiv = în trecut)
+const daysSince = (dateStr) => {
+  if (!dateStr) return null;
+  const d = new Date(dateStr);
+  if (isNaN(d)) return null;
+  return Math.floor((Date.now() - d.getTime()) / 86400000);
+};
+
+// Verifică scadența unei facturi: returnează {state, days}
+// state: "overdue" | "soon" | "ok" | null
+const scadentaStatus = (fin) => {
+  if (!fin?.dataScadenta || fin?.achitat) return null;
+  const d = new Date(fin.dataScadenta);
+  if (isNaN(d)) return null;
+  const diff = Math.ceil((d.getTime() - Date.now()) / 86400000);
+  if (diff < 0) return { state: "overdue", days: Math.abs(diff) };
+  if (diff <= 5) return { state: "soon", days: diff };
+  return { state: "ok", days: diff };
+};
+
 const calcFin = fin => {
   const totalCheltuieli = (fin.cheltuieli||[]).reduce((s,c)=>s+Number(c.suma||0),0);
   const sumaRamasa = Number(fin.sumaFacturata||0) - totalCheltuieli;
@@ -172,15 +192,46 @@ const getFirstPhoto = (d) => {
 };
 
 // ─── STORAGE ────────────────────────────────────────────────────
+// Comprimă imaginea înainte de upload (max 1600px, calitate 80%)
+// PDF-urile și alte fișiere trec neatinse.
+const compressImage = (file) => {
+  return new Promise((resolve) => {
+    if (!file.type.startsWith("image/")) { resolve(file); return; }
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const MAX = 1600;
+      let { width, height } = img;
+      if (width > MAX || height > MAX) {
+        if (width >= height) { height = Math.round(height * MAX / width); width = MAX; }
+        else { width = Math.round(width * MAX / height); height = MAX; }
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = width; canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0, width, height);
+      canvas.toBlob((blob) => {
+        if (!blob || blob.size >= file.size) { resolve(file); return; }
+        const newName = file.name.replace(/\.(png|webp|heic|heif|bmp|gif)$/i, ".jpg");
+        resolve(new File([blob], newName, { type: "image/jpeg", lastModified: Date.now() }));
+      }, "image/jpeg", 0.8);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(file); };
+    img.src = url;
+  });
+};
+
 const uploadFile = async (dosarId, folder, file) => {
-  const ext = file.name.split('.').pop();
+  const finalFile = await compressImage(file);
+  const ext = finalFile.name.split('.').pop();
   const path = `${dosarId}/${folder}/${Date.now()}_${Math.random().toString(36).slice(2,8)}.${ext}`;
-  const { error } = await supabase.storage.from(STORAGE_BUCKET).upload(path, file, {
+  const { error } = await supabase.storage.from(STORAGE_BUCKET).upload(path, finalFile, {
     cacheControl: '3600', upsert: false
   });
   if (error) throw error;
   const { data } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(path);
-  return { path, url: data.publicUrl, name: file.name, type: file.type, size: file.size, date: new Date().toISOString() };
+  return { path, url: data.publicUrl, name: finalFile.name, type: finalFile.type, size: finalFile.size, date: new Date().toISOString() };
 };
 
 const deleteFile = async (path) => {
@@ -481,7 +532,7 @@ export default function App() {
     else if (listFilter === "arhivate") result = result.filter(d => d.arhivat);
     if (search) {
       const q = search.toLowerCase();
-      result = result.filter(d => [d.nrDosar,d.proprietar?.nume,d.masina?.nrInmatriculare,d.asigurator?.companie]
+      result = result.filter(d => [d.nrDosar,d.proprietar?.nume,d.masina?.nrInmatriculare,d.masina?.vin,d.masina?.marca,d.masina?.model,d.asigurator?.companie,d.asigurator?.inspector]
         .some(v=>v?.toLowerCase().includes(q)));
     }
     return result;
@@ -715,6 +766,9 @@ function ClickableStat({ label, val, icon, accent, onClick }) {
 function DosarRow({ d, onClick }) {
   const s = STATUS[d.status]||STATUS.constatare;
   const img = getFirstPhoto(d);
+  const activ = d.status !== "finalizat" && d.status !== "arhivat";
+  const zile = activ ? daysSince(d.dataConstatare) : null;
+  const scad = scadentaStatus(d.financiar);
   return (
     <button onClick={onClick}
       className="w-full text-left flex items-center gap-3 p-2.5 rounded-xl hover:bg-slate-50 border border-slate-100 transition-all group">
@@ -739,6 +793,25 @@ function DosarRow({ d, onClick }) {
             {[`${d.masina?.marca||""} ${d.masina?.model||""}`.trim(), d.asigurator?.companie].filter(Boolean).join(" · ")}
           </span>
         </div>
+        {(zile !== null || scad) && (
+          <div className="flex items-center gap-2 mt-1">
+            {zile !== null && (
+              <span className="text-[10px] text-slate-400 flex items-center gap-1">
+                <Clock size={9}/> {zile === 0 ? "azi" : `${zile} ${zile===1?"zi":"zile"}`}
+              </span>
+            )}
+            {scad?.state === "overdue" && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-100 text-red-700 font-semibold flex items-center gap-0.5">
+                <AlertCircle size={9}/> scadent +{scad.days}z
+              </span>
+            )}
+            {scad?.state === "soon" && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 font-semibold">
+                scadență în {scad.days}z
+              </span>
+            )}
+          </div>
+        )}
       </div>
       <ChevronRight size={15} className="text-slate-300 flex-shrink-0 group-hover:text-slate-500"/>
     </button>
@@ -780,17 +853,25 @@ function ListaView({ filtered, search, setSearch, onView, listFilter, setListFil
 // ─── RAPOARTE ───────────────────────────────────────────────────
 function RapoarteView({ dosare, onUpdate, onView }) {
   const [filter, setFilter] = useState("toate");
+  const [period, setPeriod] = useState("all");
 
   const data = useMemo(()=>{
+    const ps = getPeriodStart(period);
     return dosare
       .filter(d => {
+        // perioada se aplică pe data facturii (sau updatedAt dacă nu există)
+        if (period !== "all") {
+          const ref = d.financiar?.dataFactura ? new Date(d.financiar.dataFactura) : new Date(d.updatedAt);
+          if (ref < ps) return false;
+        }
         if (filter==="neachitate") return !d.financiar?.achitat;
         if (filter==="comision_neincasat") return !d.financiar?.comisionIncasat && d.financiar?.comision > 0;
+        if (filter==="scadente") { const sc = scadentaStatus(d.financiar); return sc?.state === "overdue"; }
         if (filter==="arhivate") return d.arhivat;
         return true;
       })
       .map(d => ({ ...d, _calc: calcFin(d.financiar||{}) }));
-  }, [dosare, filter]);
+  }, [dosare, filter, period]);
 
   const totals = useMemo(()=>({
     facturat: data.reduce((s,d)=>s+Number(d.financiar?.sumaFacturata||0), 0),
@@ -799,6 +880,8 @@ function RapoarteView({ dosare, onUpdate, onView }) {
     deIncasat: data.filter(d=>!d.financiar?.comisionIncasat).reduce((s,d)=>s+(d._calc.comision||0), 0),
     incasat: data.filter(d=>d.financiar?.comisionIncasat).reduce((s,d)=>s+(d._calc.comision||0), 0),
   }), [data]);
+
+  const overdueCount = useMemo(()=>dosare.filter(d=>scadentaStatus(d.financiar)?.state==="overdue").length, [dosare]);
 
   const toggleAchitat = async (d) => {
     await onUpdate({ ...d, financiar: { ...d.financiar, achitat: !d.financiar?.achitat } });
@@ -852,6 +935,17 @@ function RapoarteView({ dosare, onUpdate, onView }) {
           </button>
         </div>
 
+        {overdueCount > 0 && (
+          <button onClick={()=>setFilter("scadente")}
+            className="w-full mt-3 bg-red-50 border border-red-200 rounded-xl p-3 flex items-center gap-2 text-left hover:bg-red-100">
+            <AlertCircle size={16} className="text-red-500 flex-shrink-0"/>
+            <span className="text-sm text-red-700 font-medium flex-1">
+              {overdueCount} {overdueCount===1?"factură depășită":"facturi depășite"} ca scadență
+            </span>
+            <ChevronRight size={14} className="text-red-400"/>
+          </button>
+        )}
+
         <div className="grid grid-cols-2 md:grid-cols-5 gap-2 mt-4">
           <TotalBox label="Facturat" val={totals.facturat} c="#0f172a" bg="#f8fafc"/>
           <TotalBox label="Cheltuieli" val={totals.cheltuieli} c="#ef4444" bg="#fef2f2"/>
@@ -860,8 +954,13 @@ function RapoarteView({ dosare, onUpdate, onView }) {
           <TotalBox label="Încasat" val={totals.incasat} c="#059669" bg="#f0fdf4"/>
         </div>
 
-        <div className="flex gap-2 mt-4 flex-wrap">
-          {[["toate","Toate"],["neachitate","Neachitate"],["comision_neincasat","Comision neîncasat"],["arhivate","Arhivate"]].map(([k,l])=>(
+        <select value={period} onChange={e=>setPeriod(e.target.value)}
+          className="w-full mt-4 border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-sky-300">
+          {PERIOD_OPTS.map(p=><option key={p.key} value={p.key}>{p.label}</option>)}
+        </select>
+
+        <div className="flex gap-2 mt-3 flex-wrap">
+          {[["toate","Toate"],["neachitate","Neachitate"],["comision_neincasat","Comision neîncasat"],["scadente","Scadente"],["arhivate","Arhivate"]].map(([k,l])=>(
             <button key={k} onClick={()=>setFilter(k)}
               className={`px-3 py-1.5 rounded-lg text-xs font-medium ${filter===k?"text-white":"bg-slate-100 text-slate-600"}`}
               style={filter===k?{background:"#0f172a"}:{}}>{l}</button>
@@ -2272,14 +2371,27 @@ function FinanciarTab({ dosar, onUpdate, isAdmin=true }) {
   const [editing, setEditing] = useState(false);
   const [fin, setFin] = useState({...dosar.financiar,cheltuieli:[...(dosar.financiar?.cheltuieli||[])]});
   const [ch, setCh] = useState({descriere:"",suma:""});
+  const [savedFlash, setSavedFlash] = useState(false);
 
-  const addCh = () => {
-    if (!ch.descriere||!ch.suma) return;
-    setFin(f=>({...f,cheltuieli:[...f.cheltuieli,{...ch,id:Date.now().toString()}]}));
-    setCh({descriere:"",suma:""});
+  const autoSave = async (data) => {
+    const payload = data || fin;
+    await onUpdate({...dosar, financiar: calcFin(payload)});
+    setSavedFlash(true);
+    setTimeout(()=>setSavedFlash(false), 1200);
   };
-  const remCh = id => setFin(f=>({...f,cheltuieli:f.cheltuieli.filter(c=>c.id!==id)}));
-  const save  = async () => { await onUpdate({...dosar,financiar:calcFin(fin)}); setEditing(false); };
+
+  const addCh = async () => {
+    if (!ch.descriere||!ch.suma) return;
+    const next = {...fin, cheltuieli:[...fin.cheltuieli,{...ch,id:Date.now().toString()}]};
+    setFin(next);
+    setCh({descriere:"",suma:""});
+    await autoSave(next);
+  };
+  const remCh = async (id) => {
+    const next = {...fin, cheltuieli:fin.cheltuieli.filter(c=>c.id!==id)};
+    setFin(next);
+    await autoSave(next);
+  };
   const prev  = calcFin(fin);
   const saved = dosar.financiar;
 
@@ -2287,17 +2399,21 @@ function FinanciarTab({ dosar, onUpdate, isAdmin=true }) {
     <Card>
       <div className="flex items-center justify-between mb-4">
         <ST>Financiar</ST>
-        {isAdmin && <button onClick={()=>{setFin({...dosar.financiar,cheltuieli:[...(dosar.financiar?.cheltuieli||[])]});setEditing(!editing);}}
-          className="flex items-center gap-1 text-sky-600 text-sm font-medium"><Edit size={14}/>{editing?"Anulează":"Editează"}</button>}
+        <div className="flex items-center gap-3">
+          {editing && savedFlash && <span className="text-xs text-emerald-600 flex items-center gap-1"><Check size={12}/>Salvat</span>}
+          {isAdmin && <button onClick={()=>{setFin({...dosar.financiar,cheltuieli:[...(dosar.financiar?.cheltuieli||[])]});setEditing(!editing);}}
+            className="flex items-center gap-1 text-sky-600 text-sm font-medium"><Edit size={14}/>{editing?"Gata":"Editează"}</button>}
+        </div>
       </div>
 
       {editing ? (
         <div className="space-y-3">
+          <div className="text-[11px] text-slate-400 -mt-1">Modificările se salvează automat</div>
           <div className="grid grid-cols-2 gap-2">
-            <FF label="Nr. factură" v={fin.nrFactura} set={v=>setFin(f=>({...f,nrFactura:v}))}/>
-            <FF label="Suma factură (lei)" type="number" v={fin.sumaFacturata} set={v=>setFin(f=>({...f,sumaFacturata:v}))}/>
-            <FF label="Data factură" type="date" v={fin.dataFactura} set={v=>setFin(f=>({...f,dataFactura:v}))}/>
-            <FF label="Data scadenței" type="date" v={fin.dataScadenta} set={v=>setFin(f=>({...f,dataScadenta:v}))}/>
+            <FF label="Nr. factură" v={fin.nrFactura} set={v=>setFin(f=>({...f,nrFactura:v}))} onBlur={()=>autoSave()}/>
+            <FF label="Suma factură (lei)" type="number" v={fin.sumaFacturata} set={v=>setFin(f=>({...f,sumaFacturata:v}))} onBlur={()=>autoSave()}/>
+            <FF label="Data factură" type="date" v={fin.dataFactura} set={v=>setFin(f=>({...f,dataFactura:v}))} onBlur={()=>autoSave()}/>
+            <FF label="Data scadenței" type="date" v={fin.dataScadenta} set={v=>setFin(f=>({...f,dataScadenta:v}))} onBlur={()=>autoSave()}/>
           </div>
           <div>
             <label className="text-xs text-slate-500 mb-1.5 block font-medium">Cheltuieli</label>
@@ -2324,7 +2440,6 @@ function FinanciarTab({ dosar, onUpdate, isAdmin=true }) {
             <div className="flex justify-between border-t border-slate-200 pt-1.5 font-semibold"><span>Diferență</span><span>{prev.sumaRamasa} lei</span></div>
             <div className="flex justify-between font-bold text-emerald-600"><span>Comision 5%</span><span>{prev.comision.toFixed(2)} lei</span></div>
           </div>
-          <button onClick={save} className="w-full py-2.5 rounded-xl text-sm font-semibold text-white" style={{background:"#0f172a"}}>Salvează</button>
         </div>
       ) : (
         <div className="space-y-3">
@@ -2367,12 +2482,22 @@ function FBox({ l, v, c, bg }) {
 function SchimbTab({ dosar, onUpdate, isAdmin=true }) {
   const [editing, setEditing] = useState(false);
   const [s, setS] = useState({...dosar.masinaSchimb});
+  const [savedFlash, setSavedFlash] = useState(false);
   const zile = calcZile(s, dosar);
   const start = getSchimbStart(s, dosar);
 
-  const save = async () => {
-    await onUpdate({...dosar,masinaSchimb:{...s,zileFacturabile:zile,totalFacturabil:zile*Number(s.tarifZi||0)}});
-    setEditing(false);
+  const autoSave = async (data) => {
+    const cur = data || s;
+    const z = calcZile(cur, dosar);
+    await onUpdate({...dosar, masinaSchimb:{...cur, zileFacturabile:z, totalFacturabil:z*Number(cur.tarifZi||0)}});
+    setSavedFlash(true);
+    setTimeout(()=>setSavedFlash(false), 1200);
+  };
+
+  const setStart = (key) => {
+    const next = {...s, startDateType:key};
+    setS(next);
+    autoSave(next);
   };
 
   const saved = dosar.masinaSchimb;
@@ -2383,31 +2508,35 @@ function SchimbTab({ dosar, onUpdate, isAdmin=true }) {
     <Card>
       <div className="flex items-center justify-between mb-4">
         <ST>Mașină la schimb (Rent)</ST>
-        {isAdmin && <button onClick={()=>{setS({...dosar.masinaSchimb});setEditing(!editing);}}
-          className="flex items-center gap-1 text-sky-600 text-sm font-medium"><Edit size={14}/>{editing?"Anulează":"Editează"}</button>}
+        <div className="flex items-center gap-3">
+          {editing && savedFlash && <span className="text-xs text-emerald-600 flex items-center gap-1"><Check size={12}/>Salvat</span>}
+          {isAdmin && <button onClick={()=>{setS({...dosar.masinaSchimb});setEditing(!editing);}}
+            className="flex items-center gap-1 text-sky-600 text-sm font-medium"><Edit size={14}/>{editing?"Gata":"Editează"}</button>}
+        </div>
       </div>
       {editing ? (
         <div className="space-y-3">
+          <div className="text-[11px] text-slate-400">Modificările se salvează automat</div>
           <div>
             <label className="text-xs text-slate-500 mb-2 block font-medium">Data start</label>
             <div className="space-y-1.5">
               {START_DATE_OPTS.map(opt=>(
                 <label key={opt.key} className="flex items-center gap-2 p-2 rounded-lg hover:bg-slate-50 cursor-pointer">
                   <input type="radio" name="st" checked={s.startDateType===opt.key}
-                    onChange={()=>setS(p=>({...p,startDateType:opt.key}))} className="accent-sky-500"/>
+                    onChange={()=>setStart(opt.key)} className="accent-sky-500"/>
                   <span className="text-sm text-slate-700">{opt.label}</span>
                 </label>
               ))}
             </div>
           </div>
-          {s.startDateType==="avizare"      && <FF label="Data avizare" type="date" v={s.dataAvizare} set={v=>setS(p=>({...p,dataAvizare:v}))}/>}
-          {s.startDateType==="raportTotala" && <FF label="Data primire raport daună totală" type="date" v={s.dataRaportTotala} set={v=>setS(p=>({...p,dataRaportTotala:v}))}/>}
-          {s.startDateType==="comandaPiesa" && <FF label="Data comandă piesă" type="date" v={s.dataComandaPiesa} set={v=>setS(p=>({...p,dataComandaPiesa:v}))}/>}
-          {s.startDateType==="primirePiese" && <FF label="Data primire piese" type="date" v={s.dataPrimirePiese} set={v=>setS(p=>({...p,dataPrimirePiese:v}))}/>}
-          {s.startDateType==="custom"       && <FF label="Dată personalizată" type="date" v={s.customStartDate} set={v=>setS(p=>({...p,customStartDate:v}))}/>}
+          {s.startDateType==="avizare"      && <FF label="Data avizare" type="date" v={s.dataAvizare} set={v=>setS(p=>({...p,dataAvizare:v}))} onBlur={()=>autoSave()}/>}
+          {s.startDateType==="raportTotala" && <FF label="Data primire raport daună totală" type="date" v={s.dataRaportTotala} set={v=>setS(p=>({...p,dataRaportTotala:v}))} onBlur={()=>autoSave()}/>}
+          {s.startDateType==="comandaPiesa" && <FF label="Data comandă piesă" type="date" v={s.dataComandaPiesa} set={v=>setS(p=>({...p,dataComandaPiesa:v}))} onBlur={()=>autoSave()}/>}
+          {s.startDateType==="primirePiese" && <FF label="Data primire piese" type="date" v={s.dataPrimirePiese} set={v=>setS(p=>({...p,dataPrimirePiese:v}))} onBlur={()=>autoSave()}/>}
+          {s.startDateType==="custom"       && <FF label="Dată personalizată" type="date" v={s.customStartDate} set={v=>setS(p=>({...p,customStartDate:v}))} onBlur={()=>autoSave()}/>}
           <div className="border-t border-slate-100 pt-3">
-            <FF label="Data predare mașină schimb" type="date" v={s.dataPredareMasinaSchimb} set={v=>setS(p=>({...p,dataPredareMasinaSchimb:v}))}/>
-            <FF label="Tarif / zi (lei)" type="number" v={s.tarifZi} set={v=>setS(p=>({...p,tarifZi:v}))}/>
+            <FF label="Data predare mașină schimb" type="date" v={s.dataPredareMasinaSchimb} set={v=>setS(p=>({...p,dataPredareMasinaSchimb:v}))} onBlur={()=>autoSave()}/>
+            <FF label="Tarif / zi (lei)" type="number" v={s.tarifZi} set={v=>setS(p=>({...p,tarifZi:v}))} onBlur={()=>autoSave()}/>
           </div>
           {start && s.dataPredareMasinaSchimb && (
             <div className="bg-sky-50 rounded-xl p-3 border border-sky-100">
@@ -2416,7 +2545,6 @@ function SchimbTab({ dosar, onUpdate, isAdmin=true }) {
               <div className="text-sm text-sky-600">Total: {zile*Number(s.tarifZi||0)} lei</div>
             </div>
           )}
-          <button onClick={save} className="w-full py-2.5 rounded-xl text-sm font-semibold text-white" style={{background:"#0f172a"}}>Salvează</button>
         </div>
       ) : (
         <div className="space-y-3">
@@ -2803,11 +2931,11 @@ function Card({ children }) {
 function ST({ children }) {
   return <h3 className="font-semibold text-xs uppercase tracking-wider text-slate-500 mb-3">{children}</h3>;
 }
-function FF({ label, type="text", v, set, ph }) {
+function FF({ label, type="text", v, set, ph, onBlur }) {
   return (
     <div className="mb-3">
       <label className="text-xs text-slate-500 mb-1.5 block font-medium">{label}</label>
-      <input type={type} value={v||""} onChange={e=>set(e.target.value)} placeholder={ph}
+      <input type={type} value={v||""} onChange={e=>set(e.target.value)} placeholder={ph} onBlur={onBlur}
         className="w-full border border-slate-200 rounded-xl px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-sky-300 bg-white transition-all"/>
     </div>
   );
