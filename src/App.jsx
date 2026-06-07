@@ -552,6 +552,7 @@ export default function App() {
     return (
       <Shell view="recon" offline={offline} isAdmin={isAdmin}
         onBack={()=>{setReconEditing(null);setReconParentId(null);}}
+        onHome={()=>{setReconEditing(null);setReconParentId(null);setSelected(null);setView("dashboard");}}
         onLogout={logout}
         onSettings={()=>{setView("settings");setReconEditing(null);setReconParentId(null);}}
         onSearch={()=>{setSearch("");setView("list");setReconEditing(null);setReconParentId(null);}}
@@ -578,6 +579,7 @@ export default function App() {
   return (
     <Shell view={view} offline={offline} isAdmin={isAdmin}
       onBack={view==="dashboard"?null:()=>setView(view==="form"?(selected?"detail":"dashboard"):"dashboard")}
+      onHome={()=>{setSelected(null);setView("dashboard");}}
       onLogout={logout}
       onSettings={()=>setView("settings")}
       onSearch={()=>openList("toate")}
@@ -602,7 +604,7 @@ export default function App() {
 }
 
 // ─── SHELL ──────────────────────────────────────────────────────
-function Shell({ view, children, offline, isAdmin=true, onBack, onLogout, onSettings, onSearch, onNew }) {
+function Shell({ view, children, offline, isAdmin=true, onBack, onHome, onLogout, onSettings, onSearch, onNew }) {
   return (
     <div className="min-h-screen" style={{background:"#f1f5f9",fontFamily:"'DM Sans','Segoe UI',sans-serif"}}>
       <header style={{background:"#0f172a"}} className="sticky top-0 z-50 shadow-lg">
@@ -613,11 +615,13 @@ function Shell({ view, children, offline, isAdmin=true, onBack, onLogout, onSett
                 <ArrowLeft size={18}/>
               </button>
             )}
-            <Logo size={34}/>
-            <div className="min-w-0">
-              <div className="font-bold text-white tracking-tight text-[15px] leading-tight">MSM</div>
-              <div className="text-slate-400 text-[10px] leading-none tracking-wider uppercase">Management Daune</div>
-            </div>
+            <button onClick={onHome} className="flex items-center gap-2.5 min-w-0 hover:opacity-80 transition-opacity" title="Meniu principal">
+              <Logo size={34}/>
+              <div className="min-w-0 text-left">
+                <div className="font-bold text-white tracking-tight text-[15px] leading-tight">MSM</div>
+                <div className="text-slate-400 text-[10px] leading-none tracking-wider uppercase">Management Daune</div>
+              </div>
+            </button>
           </div>
           <div className="flex items-center gap-1.5 flex-shrink-0">
             {offline && <WifiOff size={14} className="text-amber-400"/>}
@@ -772,8 +776,8 @@ function DosarRow({ d, onClick }) {
   return (
     <button onClick={onClick}
       className="w-full text-left flex items-center gap-3 p-2.5 rounded-xl hover:bg-slate-50 border border-slate-100 transition-all group">
-      <div className="w-12 h-12 rounded-lg flex-shrink-0 overflow-hidden bg-slate-100 flex items-center justify-center">
-        {img ? <img src={img.url||img.data} alt="" className="w-full h-full object-cover"/> : <Car size={20} className="text-slate-300"/>}
+      <div className="w-16 h-16 rounded-lg flex-shrink-0 overflow-hidden bg-slate-100 flex items-center justify-center">
+        {img ? <img src={img.url||img.data} alt="" className="w-full h-full object-cover"/> : <Car size={26} className="text-slate-300"/>}
       </div>
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between gap-2">
