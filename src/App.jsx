@@ -787,16 +787,18 @@ function DosarRow({ d, onClick }) {
             {s.label}
           </span>
         </div>
-        <div className="flex items-center gap-2 mt-1">
-          {d.masina?.nrInmatriculare && (
-            <span className="text-[11px] px-1.5 py-0.5 rounded bg-slate-900 text-white font-bold tracking-wider flex-shrink-0">
+        {d.masina?.nrInmatriculare && (
+          <div className="mt-1">
+            <span className="text-[11px] px-1.5 py-0.5 rounded bg-slate-900 text-white font-bold tracking-wider">
               {d.masina.nrInmatriculare}
             </span>
-          )}
-          <span className="text-xs text-slate-500 font-medium truncate">
+          </div>
+        )}
+        {(d.masina?.marca || d.masina?.model || d.asigurator?.companie) && (
+          <div className="text-xs text-slate-500 font-medium mt-1 truncate">
             {[`${d.masina?.marca||""} ${d.masina?.model||""}`.trim(), d.asigurator?.companie].filter(Boolean).join(" · ")}
-          </span>
-        </div>
+          </div>
+        )}
         {(zile !== null || scad) && (
           <div className="flex items-center gap-2 mt-1">
             {zile !== null && (
@@ -1273,6 +1275,10 @@ function SettingsView({ settings, onSave, onLogout, isAdmin=true }) {
 function DetailView({ dosar, tab, setTab, settings, isAdmin=true, onEdit, onDelete, onUpdate, onArchive, onAddRecon, onEditRecon }) {
   const s = STATUS[dosar.status]||STATUS.constatare;
   const img = getFirstPhoto(dosar);
+  const [headerGallery, setHeaderGallery] = useState(false);
+  const [headerIdx, setHeaderIdx] = useState(0);
+  const headerImages = (dosar.poze||[]).filter(p=>p.type?.startsWith("image"));
+  const headerStartIdx = img ? Math.max(0, headerImages.findIndex(p=>p.path===img.path)) : 0;
   const TABS = [
     {id:"info",        label:"Info",        icon:<User size={13}/>},
     {id:"reconstatare",label:"Reconstatare",icon:<ListChecks size={13}/>},
@@ -1287,17 +1293,18 @@ function DetailView({ dosar, tab, setTab, settings, isAdmin=true, onEdit, onDele
     <div className="lg:grid lg:grid-cols-[1fr_2fr] lg:gap-4 lg:items-start max-w-6xl mx-auto">
       <div className="space-y-3 mb-3 lg:mb-0">
         <Card>
-          <div className="flex items-start gap-3">
-            <div className="w-16 h-16 rounded-xl flex-shrink-0 overflow-hidden bg-slate-100 flex items-center justify-center border border-slate-200">
-              {img ? <img src={img.url||img.data} alt="" className="w-full h-full object-cover"/> : <Car size={28} className="text-slate-300"/>}
-            </div>
+          <div className="flex items-start gap-4">
+            <button onClick={img ? ()=>{setHeaderIdx(headerStartIdx);setHeaderGallery(true);} : undefined}
+              className="w-24 h-24 rounded-xl flex-shrink-0 overflow-hidden bg-slate-100 flex items-center justify-center border border-slate-200">
+              {img ? <img src={img.url||img.data} alt="" className="w-full h-full object-cover"/> : <Car size={36} className="text-slate-300"/>}
+            </button>
             <div className="flex-1 min-w-0">
               <div className="text-[10px] uppercase tracking-wider text-slate-400 font-semibold">Dosar</div>
-              <h1 className="font-bold text-slate-800 text-lg truncate">{dosar.nrDosar||"Fără număr"}</h1>
+              <h1 className="font-bold text-slate-800 text-base leading-tight break-words">{dosar.nrDosar||"Fără număr"}</h1>
               {dosar.masina?.nrInmatriculare && (
-                <span className="inline-block mt-1 text-xs px-2 py-0.5 rounded bg-slate-900 text-white font-bold tracking-wider">{dosar.masina.nrInmatriculare}</span>
+                <span className="inline-block mt-1.5 text-xs px-2 py-0.5 rounded bg-slate-900 text-white font-bold tracking-wider">{dosar.masina.nrInmatriculare}</span>
               )}
-              <div className="text-xs text-slate-500 mt-1 truncate">
+              <div className="text-xs text-slate-500 mt-1.5 break-words">
                 {dosar.masina?.marca} {dosar.masina?.model}
               </div>
             </div>
@@ -1362,11 +1369,16 @@ function DetailView({ dosar, tab, setTab, settings, isAdmin=true, onEdit, onDele
           )}
         </div>
       </div>
+
+      {headerGallery && headerImages[headerIdx] && (
+        <PhotoGallery photos={headerImages} index={headerIdx}
+          onClose={()=>setHeaderGallery(false)} onIndex={setHeaderIdx}
+          onSetPrincipala={(isAdmin && !dosar.arhivat) ? async (p)=>{ await onUpdate({...dosar, pozaPrincipala:p.path}); } : null}
+          principalaPath={dosar.pozaPrincipala}/>
+      )}
     </div>
   );
 }
-
-// ─── ZIP DOWNLOAD ───────────────────────────────────────────────
 async function downloadDosarZip(dosar) {
   try {
     const zip = new JSZip();
