@@ -4,7 +4,7 @@ import {
   Mail, Camera, Trash2, Check, Clock, Edit, ArrowLeft,
   Send, Calendar, User, Building, X, Download,
   Settings, AlertCircle, ChevronDown, WifiOff, Paperclip,
-  Lock, BarChart3, ListChecks, LogOut, Package, Archive, HardDrive, RefreshCw, Sparkles, Star
+  Lock, BarChart3, ListChecks, LogOut, Package, Archive, HardDrive, RefreshCw, Sparkles, Star, RotateCw
 } from "lucide-react";
 import { supabase } from "./supabase.js";
 import JSZip from "jszip";
@@ -220,6 +220,57 @@ const compressImage = (file) => {
     img.onerror = () => { URL.revokeObjectURL(url); resolve(file); };
     img.src = url;
   });
+};
+
+// Rotește o imagine cu N grade (90/180/270) și returnează un File nou
+const rotateImageFile = async (photo, degrees) => {
+  const resp = await fetch(photo.url || photo.data);
+  const blob = await resp.blob();
+  const img = new Image();
+  const objUrl = URL.createObjectURL(blob);
+  img.src = objUrl;
+  await img.decode();
+  URL.revokeObjectURL(objUrl);
+
+  const swap = degrees % 180 !== 0;
+  const canvas = document.createElement("canvas");
+  canvas.width = swap ? img.naturalHeight : img.naturalWidth;
+  canvas.height = swap ? img.naturalWidth : img.naturalHeight;
+  const ctx = canvas.getContext("2d");
+  ctx.translate(canvas.width / 2, canvas.height / 2);
+  ctx.rotate(degrees * Math.PI / 180);
+  ctx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
+
+  const outBlob = await new Promise(res => canvas.toBlob(res, "image/jpeg", 0.9));
+  if (!outBlob) throw new Error("Rotirea a eșuat");
+  const name = (photo.name || "poza.jpg").replace(/\.\w+$/, ".jpg");
+  return new File([outBlob], name, { type: "image/jpeg", lastModified: Date.now() });
+};
+
+// Rotește poza, o urcă în același folder și șterge originalul.
+// Returnează obiectul nou de poză (path/url noi).
+const rotateAndReplacePhoto = async (photo, degrees) => {
+  const file = await rotateImageFile(photo, degrees);
+  const parts = (photo.path || "").split("/");
+  const dosarId = parts[0] || "misc";
+  const folder = parts.slice(1, -1).join("/") || "dosar/poze";
+  const uploaded = await uploadFile(dosarId, folder, file);
+  await deleteFile(photo.path);
+  return uploaded;
+};
+
+// Înlocuiește o poză (după path) oriunde apare în dosar:
+// poze dosar + poze reconstatări + pozaPrincipala
+const replacePhotoInDosar = (dosar, oldPath, uploaded) => {
+  const patch = {
+    ...dosar,
+    poze: (dosar.poze||[]).map(x => x.path === oldPath ? uploaded : x),
+    reconstatari: (dosar.reconstatari||[]).map(r => ({
+      ...r, poze: (r.poze||[]).map(x => x.path === oldPath ? uploaded : x)
+    })),
+  };
+  if (dosar.pozaPrincipala === oldPath) patch.pozaPrincipala = uploaded.path;
+  return patch;
 };
 
 const uploadFile = async (dosarId, folder, file) => {
@@ -592,8 +643,8 @@ export default function App() {
         <DetailView dosar={selected} tab={tab} setTab={setTab} settings={settings} isAdmin={isAdmin}
           onEdit={()=>openEdit(selected)} onDelete={()=>deleteDosar(selected.id)} onUpdate={saveDosar}
           onArchive={()=>archiveDosar(selected)}
-          onAddRecon={()=>{ setReconEditing(mkReconstatare()); setReconParentId(selected.id); }}
-          onEditRecon={(r)=>{ setReconEditing(r); setReconParentId(selected.id); }}/>
+          onAddRecon={()=>{ if(!isAdmin) return; setReconEditing(mkReconstatare()); setReconParentId(selected.id); }}
+          onEditRecon={(r)=>{ if(!isAdmin) { alert("Mod vizualizare: editorul de reconstatare e disponibil doar pentru administrator."); return; } setReconEditing(r); setReconParentId(selected.id); }}/>
       )}
       {view==="form" && editing && (
         <FormView dosar={editing} tab={tab} setTab={setTab}
@@ -684,16 +735,19 @@ function Dashboard({ dosare, onView, onCreate, onOpenList, onRapoarte }) {
 
   return (
     <div className="space-y-4 max-w-2xl mx-auto">
-      <div className="grid grid-cols-2 gap-3">
-        <ClickableStat label="Total dosare"  val={stats.total}  icon={<FileText size={18}/>} accent="#38bdf8" onClick={()=>onOpenList("toate")}/>
-        <ClickableStat label="Dosare active" val={stats.active} icon={<Clock size={18}/>}    accent="#fb923c" onClick={()=>onOpenList("active")}/>
-        <ClickableStat label="Finalizate"    val={stats.fin}    icon={<Check size={18}/>}    accent="#34d399" onClick={()=>onOpenList("finalizate")}/>
-        <button onClick={onRapoarte} className="bg-white rounded-2xl shadow-sm p-4 border border-slate-100 text-left hover:shadow-md transition-shadow">
-          <div className="w-9 h-9 rounded-xl flex items-center justify-center mb-2" style={{background:"#a78bfa20",color:"#a78bfa"}}>
-            <BarChart3 size={18}/>
+      <div className="grid grid-cols-2 gap-2.5">
+        <ClickableStat label="Total dosare"  val={stats.total}  icon={<FileText size={17}/>} accent="#38bdf8" onClick={()=>onOpenList("toate")}/>
+        <ClickableStat label="Dosare active" val={stats.active} icon={<Clock size={17}/>}    accent="#fb923c" onClick={()=>onOpenList("active")}/>
+        <ClickableStat label="Finalizate"    val={stats.fin}    icon={<Check size={17}/>}    accent="#34d399" onClick={()=>onOpenList("finalizate")}/>
+        <button onClick={onRapoarte}
+          className="bg-white rounded-2xl shadow-sm px-3.5 py-3 border border-slate-100 text-left hover:shadow-md transition-shadow flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0" style={{background:"#a78bfa1a", color:"#8b5cf6"}}>
+            <BarChart3 size={17}/>
           </div>
-          <div className="text-xl font-bold text-slate-800 leading-tight">Rapoarte →</div>
-          <div className="text-xs text-slate-400 mt-0.5">{stats.deIncasat.toFixed(0)} lei de încasat</div>
+          <div className="min-w-0">
+            <div className="font-bold text-slate-800 text-sm leading-tight flex items-center gap-1">Rapoarte <ChevronRight size={13} className="text-slate-400"/></div>
+            <div className="text-[11px] text-slate-400 leading-tight mt-0.5 truncate">{stats.deIncasat.toFixed(0)} lei de încasat</div>
+          </div>
         </button>
       </div>
 
@@ -759,10 +813,13 @@ function Dashboard({ dosare, onView, onCreate, onOpenList, onRapoarte }) {
 
 function ClickableStat({ label, val, icon, accent, onClick }) {
   return (
-    <button onClick={onClick} className="bg-white rounded-2xl shadow-sm p-4 border border-slate-100 text-left hover:shadow-md transition-shadow">
-      <div className="w-9 h-9 rounded-xl flex items-center justify-center mb-2" style={{background:accent+"20",color:accent}}>{icon}</div>
-      <div className="text-xl font-bold text-slate-800 leading-tight">{val}</div>
-      <div className="text-xs text-slate-400 mt-0.5">{label}</div>
+    <button onClick={onClick}
+      className="bg-white rounded-2xl shadow-sm px-3.5 py-3 border border-slate-100 text-left hover:shadow-md transition-shadow flex items-center gap-3">
+      <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0" style={{background:accent+"1a", color:accent}}>{icon}</div>
+      <div className="min-w-0">
+        <div className="text-xl font-bold text-slate-800 leading-none">{val}</div>
+        <div className="text-[11px] text-slate-400 leading-tight mt-1 truncate">{label}</div>
+      </div>
     </button>
   );
 }
@@ -1277,7 +1334,10 @@ function DetailView({ dosar, tab, setTab, settings, isAdmin=true, onEdit, onDele
   const img = getFirstPhoto(dosar);
   const [headerGallery, setHeaderGallery] = useState(false);
   const [headerIdx, setHeaderIdx] = useState(0);
-  const headerImages = (dosar.poze||[]).filter(p=>p.type?.startsWith("image"));
+  const headerImages = [
+    ...(dosar.poze||[]),
+    ...((dosar.reconstatari||[]).flatMap(r => r.poze||[]))
+  ].filter(p=>p.type?.startsWith("image"));
   const headerStartIdx = img ? Math.max(0, headerImages.findIndex(p=>p.path===img.path)) : 0;
   const TABS = [
     {id:"info",        label:"Info",        icon:<User size={13}/>},
@@ -1374,7 +1434,11 @@ function DetailView({ dosar, tab, setTab, settings, isAdmin=true, onEdit, onDele
         <PhotoGallery photos={headerImages} index={headerIdx}
           onClose={()=>setHeaderGallery(false)} onIndex={setHeaderIdx}
           onSetPrincipala={(isAdmin && !dosar.arhivat) ? async (p)=>{ await onUpdate({...dosar, pozaPrincipala:p.path}); } : null}
-          principalaPath={dosar.pozaPrincipala}/>
+          principalaPath={dosar.pozaPrincipala}
+          onRotateSave={(isAdmin && !dosar.arhivat) ? async (p, deg)=>{
+            const uploaded = await rotateAndReplacePhoto(p, deg);
+            await onUpdate(replacePhotoInDosar(dosar, p.path, uploaded));
+          } : null}/>
       )}
     </div>
   );
@@ -1537,7 +1601,11 @@ function InfoTab({ dosar, onEditRecon, onUpdate, isAdmin=true }) {
       {galIdx !== null && imagini[galIdx] && (
         <PhotoGallery photos={imagini} index={galIdx} onClose={()=>setGalIdx(null)} onIndex={setGalIdx}
           onSetPrincipala={blocked ? null : async (p)=>{ await setPrincipala(p); }}
-          principalaPath={dosar.pozaPrincipala}/>
+          principalaPath={dosar.pozaPrincipala}
+          onRotateSave={blocked ? null : async (p, deg)=>{
+            const uploaded = await rotateAndReplacePhoto(p, deg);
+            await onUpdate(replacePhotoInDosar(dosar, p.path, uploaded));
+          }}/>
       )}
 
       {viewDoc && <DocViewer doc={viewDoc} onClose={()=>setViewDoc(null)}/>}
@@ -1665,135 +1733,211 @@ function IR({ l, v }) {
   );
 }
 
-// ─── PHOTO GALLERY (cu zoom & pan) ─────────────────────────────
-function PhotoGallery({ photos, index, onClose, onIndex, onSetPrincipala, principalaPath }) {
+// ─── PHOTO GALLERY (zoom, pan, rotire) ──────────────────────────
+function PhotoGallery({ photos, index, onClose, onIndex, onSetPrincipala, principalaPath, onRotateSave }) {
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [rot, setRot] = useState(0);          // 0/90/180/270 — doar vizual până la salvare
+  const [rotFit, setRotFit] = useState(1);    // factor de încadrare când poza e rotită
+  const [savingRot, setSavingRot] = useState(false);
   const imgRef = useRef(null);
-  const containerRef = useRef(null);
 
-  // Touch state
-  const lastTouchDist = useRef(null);
-  const lastPanStart = useRef(null);
+  // Stare gesturi (refs — nu declanșează re-render)
+  const pinchDist = useRef(null);
+  const pinchMid = useRef(null);
+  const panStart = useRef(null);
   const swipeStart = useRef(null);
+  const mouseStart = useRef(null);
 
-  const prev = () => { resetZoom(); onIndex(index === 0 ? photos.length - 1 : index - 1); };
-  const next = () => { resetZoom(); onIndex(index === photos.length - 1 ? 0 : index + 1); };
-  const resetZoom = () => { setZoom(1); setPan({ x: 0, y: 0 }); };
+  const resetView = () => { setZoom(1); setPan({ x: 0, y: 0 }); setRot(0); setRotFit(1); };
+  const prev = () => { resetView(); onIndex(index === 0 ? photos.length - 1 : index - 1); };
+  const next = () => { resetView(); onIndex(index === photos.length - 1 ? 0 : index + 1); };
 
-  // Reset zoom când se schimbă poza
-  useEffect(() => { resetZoom(); }, [index]);
+  useEffect(() => { resetView(); }, [index]);
 
   useEffect(() => {
     const h = ev => {
       if (ev.key === "ArrowLeft") prev();
       else if (ev.key === "ArrowRight") next();
       else if (ev.key === "Escape") onClose();
-      else if (ev.key === "0") resetZoom();
+      else if (ev.key === "0") resetView();
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
     // eslint-disable-next-line
   }, [index, photos.length]);
 
-  // Scroll wheel zoom (laptop/desktop)
+  // ── Zoom cu scroll (laptop) ──
   const onWheel = (e) => {
-    e.preventDefault();
-    const delta = e.deltaY > 0 ? -0.2 : 0.2;
-    setZoom(z => Math.max(1, Math.min(5, z + delta)));
-    if (zoom + delta <= 1) setPan({ x: 0, y: 0 });
+    const delta = e.deltaY > 0 ? -0.25 : 0.25;
+    setZoom(z => {
+      const nz = Math.max(1, Math.min(5, z + delta));
+      if (nz <= 1) setPan({ x: 0, y: 0 });
+      return nz;
+    });
   };
 
-  // Double click/tap to toggle zoom
+  // ── Dublu click/tap: zoom rapid ──
   const onDoubleClick = () => {
-    if (zoom > 1) {
-      resetZoom();
-    } else {
-      setZoom(2.5);
-    }
+    if (zoom > 1) { setZoom(1); setPan({ x: 0, y: 0 }); }
+    else setZoom(2.5);
   };
 
-  // Pinch-to-zoom (mobile) + pan
-  const getTouchDist = (touches) => {
-    const dx = touches[0].clientX - touches[1].clientX;
-    const dy = touches[0].clientY - touches[1].clientY;
-    return Math.sqrt(dx*dx + dy*dy);
+  // ── Rotire 90° (vizual) ──
+  const applyRotate = () => {
+    const nextRot = (rot + 90) % 360;
+    let fit = 1;
+    const img = imgRef.current;
+    if (img && nextRot % 180 !== 0) {
+      const box = img.parentElement;
+      if (box && img.offsetWidth && img.offsetHeight) {
+        fit = Math.min(box.clientWidth / img.offsetHeight, box.clientHeight / img.offsetWidth, 1);
+      }
+    }
+    setRotFit(nextRot % 180 !== 0 ? fit : 1);
+    setRot(nextRot);
+    setPan({ x: 0, y: 0 });
   };
+
+  const saveRotation = async () => {
+    if (!onRotateSave || rot === 0 || savingRot) return;
+    setSavingRot(true);
+    try {
+      await onRotateSave(photos[index], rot);
+      setRot(0); setRotFit(1);
+    } catch (err) {
+      alert("Eroare la salvarea rotirii: " + (err.message || err));
+    }
+    setSavingRot(false);
+  };
+
+  // ── Gesturi touch ──
+  const dist2 = (t) => {
+    const dx = t[0].clientX - t[1].clientX, dy = t[0].clientY - t[1].clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  };
+  const mid2 = (t) => ({ x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 });
 
   const onTouchStart = (e) => {
     if (e.touches.length === 2) {
-      // Start pinch
-      lastTouchDist.current = getTouchDist(e.touches);
+      pinchDist.current = dist2(e.touches);
+      const m = mid2(e.touches);
+      pinchMid.current = { x: m.x - pan.x, y: m.y - pan.y };
+      panStart.current = null;
       swipeStart.current = null;
     } else if (e.touches.length === 1) {
       if (zoom > 1) {
-        // Start pan
-        lastPanStart.current = { x: e.touches[0].clientX - pan.x, y: e.touches[0].clientY - pan.y };
+        panStart.current = { x: e.touches[0].clientX - pan.x, y: e.touches[0].clientY - pan.y };
+        swipeStart.current = null;
       } else {
-        // Start swipe
         swipeStart.current = e.touches[0].clientX;
+        panStart.current = null;
       }
     }
   };
 
   const onTouchMove = (e) => {
-    if (e.touches.length === 2 && lastTouchDist.current !== null) {
-      // Pinch zoom
-      e.preventDefault();
-      const newDist = getTouchDist(e.touches);
-      const scale = newDist / lastTouchDist.current;
+    if (e.touches.length === 2 && pinchDist.current) {
+      // Pinch: zoom + pan simultan din mijlocul degetelor
+      const nd = dist2(e.touches);
+      const scale = nd / pinchDist.current;
+      pinchDist.current = nd;
       setZoom(z => Math.max(1, Math.min(5, z * scale)));
-      lastTouchDist.current = newDist;
-    } else if (e.touches.length === 1 && zoom > 1 && lastPanStart.current) {
-      // Pan
-      e.preventDefault();
+      if (pinchMid.current) {
+        const m = mid2(e.touches);
+        setPan({ x: m.x - pinchMid.current.x, y: m.y - pinchMid.current.y });
+      }
+    } else if (e.touches.length === 1 && zoom > 1) {
+      // Pan cu un deget — se auto-inițializează dacă vine direct după pinch
+      if (!panStart.current) {
+        panStart.current = { x: e.touches[0].clientX - pan.x, y: e.touches[0].clientY - pan.y };
+        return;
+      }
       setPan({
-        x: e.touches[0].clientX - lastPanStart.current.x,
-        y: e.touches[0].clientY - lastPanStart.current.y,
+        x: e.touches[0].clientX - panStart.current.x,
+        y: e.touches[0].clientY - panStart.current.y,
       });
     }
   };
 
   const onTouchEnd = (e) => {
-    if (e.touches.length === 0) {
-      // Swipe between photos (only if not zoomed)
+    if (e.touches.length === 1) {
+      // Tranziție pinch → un deget: continuă cu pan fără să ridici tot
+      pinchDist.current = null;
+      pinchMid.current = null;
+      panStart.current = zoom > 1
+        ? { x: e.touches[0].clientX - pan.x, y: e.touches[0].clientY - pan.y }
+        : null;
+      swipeStart.current = null;
+    } else if (e.touches.length === 0) {
       if (swipeStart.current !== null && zoom <= 1) {
         const diff = e.changedTouches[0].clientX - swipeStart.current;
         if (Math.abs(diff) > 50) { diff > 0 ? prev() : next(); }
       }
-      lastTouchDist.current = null;
-      lastPanStart.current = null;
+      pinchDist.current = null;
+      pinchMid.current = null;
+      panStart.current = null;
       swipeStart.current = null;
       if (zoom <= 1.05) { setZoom(1); setPan({ x: 0, y: 0 }); }
     }
   };
 
+  // ── Pan cu mouse (laptop) ──
+  const onMouseDown = (e) => {
+    if (zoom > 1) {
+      e.preventDefault();
+      mouseStart.current = { x: e.clientX - pan.x, y: e.clientY - pan.y };
+    }
+  };
+  const onMouseMove = (e) => {
+    if (mouseStart.current && e.buttons === 1) {
+      setPan({ x: e.clientX - mouseStart.current.x, y: e.clientY - mouseStart.current.y });
+    } else if (mouseStart.current && e.buttons !== 1) {
+      mouseStart.current = null;
+    }
+  };
+  const onMouseUp = () => { mouseStart.current = null; };
+
   const photo = photos[index];
+  const dragging = !!(panStart.current || mouseStart.current || pinchDist.current);
+  const ePrincipala = principalaPath ? principalaPath === photo.path : index === 0;
 
   return (
-    <div ref={containerRef} className="fixed inset-0 z-[100] bg-black/95 flex flex-col"
-      style={{ touchAction: 'none' }}>
+    <div className="fixed inset-0 z-[100] bg-black/95 flex flex-col" style={{ touchAction: "none" }}>
       <div className="flex justify-between items-center p-4 text-white z-20 relative">
         <div className="text-sm">{index + 1} / {photos.length}</div>
         <div className="flex items-center gap-2">
           {zoom > 1 && (
-            <button onClick={resetZoom} className="px-3 py-1 rounded-full bg-white/10 text-xs">
+            <button onClick={()=>{setZoom(1);setPan({x:0,y:0});}} className="px-3 py-1 rounded-full bg-white/10 text-xs">
               {zoom.toFixed(1)}× • Reset
             </button>
           )}
-          {onSetPrincipala && (() => {
-            const cur = photos[index];
-            const ePrincipala = principalaPath ? principalaPath === cur.path : index === 0;
-            return (
-              <button onClick={()=>onSetPrincipala(cur)} title={ePrincipala?"Imagine principală":"Setează ca principală"}
-                className="p-2 rounded-full bg-white/10 hover:bg-white/20 transition-colors">
-                <Star size={18} fill={ePrincipala ? "#fbbf24" : "none"} color={ePrincipala ? "#fbbf24" : "#fff"}/>
-              </button>
-            );
-          })()}
+          <button onClick={applyRotate} title="Rotește 90°"
+            className="p-2 rounded-full bg-white/10 hover:bg-white/20 transition-colors">
+            <RotateCw size={18}/>
+          </button>
+          {onSetPrincipala && (
+            <button onClick={()=>onSetPrincipala(photo)} title={ePrincipala?"Imagine principală":"Setează ca principală"}
+              className="p-2 rounded-full bg-white/10 hover:bg-white/20 transition-colors">
+              <Star size={18} fill={ePrincipala ? "#fbbf24" : "none"} color={ePrincipala ? "#fbbf24" : "#fff"}/>
+            </button>
+          )}
           <button onClick={onClose} className="p-2 rounded-full bg-white/10"><X size={18}/></button>
         </div>
       </div>
+
+      {/* Bara de salvare rotire — apare doar când poza e rotită */}
+      {rot !== 0 && onRotateSave && (
+        <div className="px-4 pb-2 z-20 relative">
+          <button onClick={saveRotation} disabled={savingRot}
+            className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-semibold text-white disabled:opacity-60"
+            style={{background:"#0284c7"}}>
+            {savingRot
+              ? <><div className="w-4 h-4 rounded-full border-2 border-white border-t-transparent animate-spin"/> Se salvează...</>
+              : <><Check size={15}/> Salvează rotirea ({rot}°)</>}
+          </button>
+        </div>
+      )}
 
       <div
         className="flex-1 flex items-center justify-center relative px-2 overflow-hidden"
@@ -1801,6 +1945,10 @@ function PhotoGallery({ photos, index, onClose, onIndex, onSetPrincipala, princi
         onTouchStart={onTouchStart}
         onTouchMove={onTouchMove}
         onTouchEnd={onTouchEnd}
+        onMouseDown={onMouseDown}
+        onMouseMove={onMouseMove}
+        onMouseUp={onMouseUp}
+        onMouseLeave={onMouseUp}
       >
         {zoom <= 1 && (
           <button onClick={prev} className="absolute left-2 p-3 rounded-full bg-white/10 text-white hover:bg-white/20 z-10">
@@ -1815,10 +1963,10 @@ function PhotoGallery({ photos, index, onClose, onIndex, onSetPrincipala, princi
           onDoubleClick={onDoubleClick}
           className="max-w-full max-h-full object-contain select-none"
           style={{
-            transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
-            transformOrigin: 'center center',
-            transition: lastTouchDist.current || lastPanStart.current ? 'none' : 'transform 0.15s ease-out',
-            cursor: zoom > 1 ? 'grab' : 'zoom-in',
+            transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom * rotFit}) rotate(${rot}deg)`,
+            transformOrigin: "center center",
+            transition: dragging ? "none" : "transform 0.18s ease-out",
+            cursor: zoom > 1 ? "grab" : "zoom-in",
           }}
           draggable={false}
         />
@@ -1833,7 +1981,7 @@ function PhotoGallery({ photos, index, onClose, onIndex, onSetPrincipala, princi
       <div className="p-3 text-center text-white/70 text-xs">
         <div className="truncate">{photo.name}</div>
         <div className="text-white/40 mt-1">
-          {zoom > 1 ? "Trage pentru a muta · Dublu-click pentru reset" : "Pinch/scroll pentru zoom · Dublu-click pentru zoom rapid"}
+          {zoom > 1 ? "Trage pentru a muta · Dublu-click pentru reset" : "Pinch/scroll pentru zoom · Rotește din butonul ↻"}
         </div>
       </div>
     </div>
@@ -2103,7 +2251,11 @@ function ReconstatareWorkflow({ dosar, recon, settings, onSave, onCancel }) {
       </Card>
 
       {galIdx !== null && imagini[galIdx] && (
-        <PhotoGallery photos={imagini} index={galIdx} onClose={()=>setGalIdx(null)} onIndex={setGalIdx}/>
+        <PhotoGallery photos={imagini} index={galIdx} onClose={()=>setGalIdx(null)} onIndex={setGalIdx}
+          onRotateSave={async (p, deg)=>{
+            const uploaded = await rotateAndReplacePhoto(p, deg);
+            setE(prev => ({ ...prev, poze: (prev.poze||[]).map(x => x.path === p.path ? uploaded : x) }));
+          }}/>
       )}
 
       {viewDoc && <DocViewer doc={viewDoc} onClose={()=>setViewDoc(null)}/>}
