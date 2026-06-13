@@ -2111,12 +2111,45 @@ function ReconstatareWorkflow({ dosar, recon, settings, onSave, onCancel }) {
   const [uploadingDoc, setUploadingDoc] = useState(false);
   const [galIdx, setGalIdx] = useState(null);
   const [viewDoc, setViewDoc] = useState(null);
+  const [showPicker, setShowPicker] = useState(false);
+  const [pickerSel, setPickerSel] = useState([]);
+  const [copying, setCopying] = useState(false);
   const pozeRef = useRef();
   const docRef = useRef();
+
+  // Reconstatarea trimisă e blocată — se creează una nouă pentru modificări
+  const locked = !!e.emailSent;
 
   const companie = dosar.asigurator?.companie;
   const recipient = getAsigEmail(settings, companie, "reconstatare");
   const { subject, body } = useMemo(() => buildReconstatareEmail(dosar, e, e.emailExtra), [dosar, e]);
+
+  // Pozele dosarului (de la constatare) disponibile pentru copiere
+  const dosarImages = (dosar.poze||[]).filter(p=>p.type?.startsWith("image"));
+
+  const togglePick = (path) => setPickerSel(sel =>
+    sel.includes(path) ? sel.filter(x=>x!==path) : [...sel, path]
+  );
+
+  const copyFromDosar = async () => {
+    if (!pickerSel.length) { setShowPicker(false); return; }
+    setCopying(true);
+    try {
+      const chosen = dosarImages.filter(p => pickerSel.includes(p.path));
+      const copied = [];
+      for (const p of chosen) {
+        const resp = await fetch(p.url);
+        const blob = await resp.blob();
+        const file = new File([blob], p.name || "poza.jpg", { type: p.type || blob.type });
+        const uploaded = await uploadFile(dosar.id, `recon_${e.id}/poze`, file);
+        copied.push(uploaded);
+      }
+      setE(prev => ({ ...prev, poze: [...(prev.poze||[]), ...copied] }));
+      setPickerSel([]);
+      setShowPicker(false);
+    } catch(err) { alert("Eroare la copiere: "+err.message); }
+    setCopying(false);
+  };
 
   const addPiesa = () => setE(p => ({ ...p, piese: [...p.piese, { id: Date.now().toString() + Math.random(), piesa: "", solutie: "INL", solutieCustom: "" }] }));
   const updPiesa = (idx, field, val) => setE(p => ({ ...p, piese: p.piese.map((it,i) => i===idx ? { ...it, [field]: val } : it) }));
@@ -2212,38 +2245,102 @@ function ReconstatareWorkflow({ dosar, recon, settings, onSave, onCancel }) {
         </div>
       </Card>
 
+      {locked && (
+        <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-3.5 flex items-start gap-2.5">
+          <Check size={16} className="text-emerald-600 flex-shrink-0 mt-0.5"/>
+          <div className="text-xs text-emerald-800">
+            <div className="font-semibold mb-0.5">Reconstatare trimisă la {fmtDate(e.emailSentAt)}</div>
+            O reconstatare trimisă nu se mai poate modifica sau retrimite.
+            Dacă e nevoie de schimbări, creează o reconstatare nouă.
+          </div>
+        </div>
+      )}
+
       <Card>
         <ST>1. Data & observații</ST>
-        <FF label="Data reconstatării" type="date" v={e.data} set={v=>setE(p=>({...p,data:v}))}/>
+        <FF label="Data reconstatării" type="date" v={e.data} set={locked ? ()=>{} : v=>setE(p=>({...p,data:v}))}/>
         <div>
           <label className="text-xs text-slate-500 mb-1.5 block font-medium">Observații</label>
-          <textarea value={e.observatii||""} onChange={ev=>setE(p=>({...p,observatii:ev.target.value}))}
-            rows={2} placeholder="Note interne..."
-            className="w-full border border-slate-200 rounded-xl px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-sky-300 resize-none"/>
+          <textarea value={e.observatii||""} onChange={ev=>!locked && setE(p=>({...p,observatii:ev.target.value}))}
+            rows={2} placeholder="Note interne..." readOnly={locked}
+            className="w-full border border-slate-200 rounded-xl px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-sky-300 resize-none read-only:bg-slate-50"/>
         </div>
       </Card>
 
       <Card>
         <div className="flex items-center justify-between mb-3">
-          <ST>2. Poze ({(e.poze||[]).length})</ST>
-          <button onClick={()=>pozeRef.current.click()} disabled={uploadingPoze} className="flex items-center gap-1 text-sky-600 text-sm font-medium disabled:opacity-50">
-            <Camera size={15}/> {uploadingPoze?"Se urcă...":"Adaugă"}
-          </button>
+          <ST>2. Poze reconstatare ({(e.poze||[]).length})</ST>
+          {!locked && (
+            <div className="flex items-center gap-3">
+              {dosarImages.length > 0 && (
+                <button onClick={()=>{setShowPicker(s=>!s);setPickerSel([]);}} disabled={copying}
+                  className="flex items-center gap-1 text-violet-600 text-sm font-medium disabled:opacity-50">
+                  <FileText size={14}/> Din dosar
+                </button>
+              )}
+              <button onClick={()=>pozeRef.current.click()} disabled={uploadingPoze} className="flex items-center gap-1 text-sky-600 text-sm font-medium disabled:opacity-50">
+                <Camera size={15}/> {uploadingPoze?"Se urcă...":"Adaugă"}
+              </button>
+            </div>
+          )}
         </div>
         <input ref={pozeRef} type="file" multiple accept="image/*" className="hidden" onChange={addPoze}/>
+
+        {/* Selector poze din dosar (constatare) */}
+        {showPicker && !locked && (
+          <div className="bg-violet-50 border border-violet-200 rounded-xl p-3 mb-3">
+            <div className="text-xs font-semibold text-violet-700 mb-2">
+              Poze din dosar (constatare) — selectează ce vrei să copiezi
+            </div>
+            <div className="grid grid-cols-4 gap-1.5 mb-3">
+              {dosarImages.map(p => {
+                const sel = pickerSel.includes(p.path);
+                return (
+                  <button key={p.path} onClick={()=>togglePick(p.path)}
+                    className={`relative aspect-square rounded-lg overflow-hidden border-2 transition-all ${sel?"border-violet-500":"border-transparent opacity-80"}`}>
+                    <img src={p.url||p.data} alt="" className="w-full h-full object-cover"/>
+                    {sel && (
+                      <div className="absolute top-0.5 right-0.5 bg-violet-500 text-white rounded-full w-5 h-5 flex items-center justify-center">
+                        <Check size={12}/>
+                      </div>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="flex gap-2">
+              <button onClick={()=>{setShowPicker(false);setPickerSel([]);}} disabled={copying}
+                className="flex-1 py-2 rounded-lg text-xs font-medium border border-violet-200 text-violet-600 bg-white">Renunță</button>
+              <button onClick={copyFromDosar} disabled={copying || !pickerSel.length}
+                className="flex-1 py-2 rounded-lg text-xs font-semibold text-white disabled:opacity-50" style={{background:"#7c3aed"}}>
+                {copying ? "Se copiază..." : `Copiază ${pickerSel.length||""} ${pickerSel.length===1?"poză":"poze"}`}
+              </button>
+            </div>
+            <div className="text-[10px] text-violet-500 mt-2">
+              Pozele se copiază — cele din dosar rămân neatinse, separate de cele de la reconstatare.
+            </div>
+          </div>
+        )}
+
         {(e.poze||[]).length===0 ? (
-          <button onClick={()=>pozeRef.current.click()} disabled={uploadingPoze}
-            className="w-full py-6 border-2 border-dashed border-slate-200 rounded-xl text-slate-400 text-sm hover:bg-slate-50 disabled:opacity-50">
-            <Camera size={24} className="mx-auto mb-1"/> {uploadingPoze?"Se urcă pozele...":"Apasă pentru a adăuga poze"}
-          </button>
+          locked ? (
+            <div className="text-center py-4 text-slate-400 text-xs">Nicio poză</div>
+          ) : (
+            <button onClick={()=>pozeRef.current.click()} disabled={uploadingPoze}
+              className="w-full py-6 border-2 border-dashed border-slate-200 rounded-xl text-slate-400 text-sm hover:bg-slate-50 disabled:opacity-50">
+              <Camera size={24} className="mx-auto mb-1"/> {uploadingPoze?"Se urcă pozele...":"Apasă pentru a adăuga poze"}
+            </button>
+          )
         ) : (
           <div className="grid grid-cols-3 gap-2">
             {imagini.map((p, idx) => (
               <div key={p.path||p.url} className="relative aspect-square rounded-lg overflow-hidden border border-slate-100 group">
                 <img src={p.url||p.data} alt={p.name} className="w-full h-full object-cover cursor-pointer" onClick={()=>setGalIdx(idx)}/>
-                <button onClick={()=>delPoza(p)} className="absolute top-1 right-1 bg-red-500 text-white rounded-full p-0.5 shadow-md">
-                  <X size={11}/>
-                </button>
+                {!locked && (
+                  <button onClick={()=>delPoza(p)} className="absolute top-1 right-1 bg-red-500 text-white rounded-full p-0.5 shadow-md">
+                    <X size={11}/>
+                  </button>
+                )}
               </div>
             ))}
           </div>
@@ -2252,7 +2349,7 @@ function ReconstatareWorkflow({ dosar, recon, settings, onSave, onCancel }) {
 
       {galIdx !== null && imagini[galIdx] && (
         <PhotoGallery photos={imagini} index={galIdx} onClose={()=>setGalIdx(null)} onIndex={setGalIdx}
-          onRotateSave={async (p, deg)=>{
+          onRotateSave={locked ? null : async (p, deg)=>{
             const uploaded = await rotateAndReplacePhoto(p, deg);
             setE(prev => ({ ...prev, poze: (prev.poze||[]).map(x => x.path === p.path ? uploaded : x) }));
           }}/>
@@ -2263,10 +2360,24 @@ function ReconstatareWorkflow({ dosar, recon, settings, onSave, onCancel }) {
       <Card>
         <div className="flex items-center justify-between mb-3">
           <ST>3. Listă piese</ST>
-          <button onClick={addPiesa} className="flex items-center gap-1 text-sky-600 text-sm font-medium">
-            <Plus size={15}/> Rând
-          </button>
+          {!locked && (
+            <button onClick={addPiesa} className="flex items-center gap-1 text-sky-600 text-sm font-medium">
+              <Plus size={15}/> Rând
+            </button>
+          )}
         </div>
+        {locked ? (
+          <div className="space-y-1.5">
+            {e.piese.filter(p=>p.piesa?.trim()).length === 0 ? (
+              <div className="text-center py-3 text-slate-400 text-xs">Nicio piesă</div>
+            ) : e.piese.filter(p=>p.piesa?.trim()).map((p, i) => (
+              <div key={p.id} className="flex items-center justify-between gap-3 bg-slate-50 rounded-lg px-3 py-2 text-sm">
+                <span className="text-slate-700">{i+1}. {p.piesa}</span>
+                <span className="text-slate-500 font-semibold text-xs">{p.solutie === "__custom__" ? p.solutieCustom : p.solutie}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
         <div className="space-y-1.5">
           <div className="flex gap-2 px-1 text-[10px] text-slate-400 font-semibold uppercase tracking-wider">
             <div className="flex-1">Piesă</div>
@@ -2302,17 +2413,22 @@ function ReconstatareWorkflow({ dosar, recon, settings, onSave, onCancel }) {
             </div>
           ))}
         </div>
-        <button onClick={addPiesa} className="w-full mt-3 py-2 border border-dashed border-slate-200 rounded-lg text-xs text-slate-500 hover:bg-slate-50">
-          + Adaugă încă un rând
-        </button>
+        )}
+        {!locked && (
+          <button onClick={addPiesa} className="w-full mt-3 py-2 border border-dashed border-slate-200 rounded-lg text-xs text-slate-500 hover:bg-slate-50">
+            + Adaugă încă un rând
+          </button>
+        )}
       </Card>
 
       <Card>
         <div className="flex items-center justify-between mb-3">
           <ST>4. Documente atașate</ST>
-          <button onClick={()=>docRef.current.click()} disabled={uploadingDoc} className="flex items-center gap-1 text-sky-600 text-sm font-medium disabled:opacity-50">
-            <Paperclip size={15}/> {uploadingDoc?"Se urcă...":"Atașează"}
-          </button>
+          {!locked && (
+            <button onClick={()=>docRef.current.click()} disabled={uploadingDoc} className="flex items-center gap-1 text-sky-600 text-sm font-medium disabled:opacity-50">
+              <Paperclip size={15}/> {uploadingDoc?"Se urcă...":"Atașează"}
+            </button>
+          )}
         </div>
         <input ref={docRef} type="file" multiple className="hidden" onChange={addDocs}/>
         {(e.documente||[]).length===0 ? (
@@ -2323,7 +2439,7 @@ function ReconstatareWorkflow({ dosar, recon, settings, onSave, onCancel }) {
               <div key={d.path} className="flex items-center gap-2 bg-slate-50 rounded-lg px-3 py-2">
                 <FileText size={14} className="text-slate-400 flex-shrink-0"/>
                 <button onClick={()=>setViewDoc(d)} className="flex-1 text-left text-sm text-slate-700 truncate hover:text-sky-600">{d.name}</button>
-                <button onClick={()=>delDoc(d)} className="text-red-400"><X size={13}/></button>
+                {!locked && <button onClick={()=>delDoc(d)} className="text-red-400"><X size={13}/></button>}
               </div>
             ))}
           </div>
@@ -2351,9 +2467,9 @@ function ReconstatareWorkflow({ dosar, recon, settings, onSave, onCancel }) {
         </div>
         <div className="mb-3">
           <label className="text-xs text-slate-500 mb-1.5 block font-medium">Text suplimentar (opțional)</label>
-          <textarea value={e.emailExtra} onChange={ev=>setE(p=>({...p,emailExtra:ev.target.value}))}
-            rows={3} placeholder="Ex: justificare zile închiriere..."
-            className="w-full border border-slate-200 rounded-xl px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-sky-300 resize-none text-sm"/>
+          <textarea value={e.emailExtra} onChange={ev=>!locked && setE(p=>({...p,emailExtra:ev.target.value}))}
+            rows={3} placeholder="Ex: justificare zile închiriere..." readOnly={locked}
+            className="w-full border border-slate-200 rounded-xl px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-sky-300 resize-none text-sm read-only:bg-slate-50"/>
         </div>
         {emailStatus==="error" && (
           <div className="bg-red-50 border border-red-200 rounded-xl p-3 mb-3 text-xs text-red-700 flex items-start gap-2">
@@ -2370,18 +2486,28 @@ function ReconstatareWorkflow({ dosar, recon, settings, onSave, onCancel }) {
             <Check size={14}/> Mail trimis la {fmtDate(e.emailSentAt)}
           </div>
         )}
-        <button onClick={sendNow} disabled={emailStatus==="sending"}
-          className="w-full py-3 rounded-xl text-sm font-semibold text-white flex items-center justify-center gap-2 disabled:opacity-60"
-          style={{background:"#0f172a"}}>
-          <Send size={14}/>{emailStatus==="sending"?"Se trimite...":"Trimite mail"}
-        </button>
+        {!locked && (
+          <button onClick={sendNow} disabled={emailStatus==="sending"}
+            className="w-full py-3 rounded-xl text-sm font-semibold text-white flex items-center justify-center gap-2 disabled:opacity-60"
+            style={{background:"#0f172a"}}>
+            <Send size={14}/>{emailStatus==="sending"?"Se trimite...":"Trimite mail"}
+          </button>
+        )}
       </Card>
 
       <div className="flex gap-3 sticky bottom-2">
-        <button onClick={onCancel} className="flex-1 py-3 rounded-2xl text-slate-600 font-semibold border border-slate-200 bg-white shadow-sm">Anulează</button>
-        <button onClick={()=>onSave(e)} className="flex-1 py-3 rounded-2xl text-white font-semibold shadow-sm" style={{background:"#0f172a"}}>
-          Salvează
-        </button>
+        {locked ? (
+          <button onClick={onCancel} className="flex-1 py-3 rounded-2xl text-white font-semibold shadow-sm" style={{background:"#0f172a"}}>
+            Înapoi la dosar
+          </button>
+        ) : (
+          <>
+            <button onClick={onCancel} className="flex-1 py-3 rounded-2xl text-slate-600 font-semibold border border-slate-200 bg-white shadow-sm">Anulează</button>
+            <button onClick={()=>onSave(e)} className="flex-1 py-3 rounded-2xl text-white font-semibold shadow-sm" style={{background:"#0f172a"}}>
+              Salvează
+            </button>
+          </>
+        )}
       </div>
     </div>
   );
@@ -2446,6 +2572,24 @@ function DespagubireTab({ dosar, settings, onUpdate, isAdmin=true }) {
   };
 
   const saveExtra = () => onUpdate({ ...dosar, despagubire: { ...dosar.despagubire, emailExtra: extra } });
+
+  // Salvare fără email — pentru cazurile trimise prin Audatex.
+  // Marchează cererea ca finalizată exact ca la trimiterea pe email.
+  const saveWithoutEmail = async () => {
+    if (!confirm("Salvezi cererea de despăgubire FĂRĂ a trimite email?\n\nDosarul va fi marcat ca Finalizat (caz Audatex).\nDocumentele, sumele și scadențele rămân salvate în dosar.")) return;
+    setStatus("saving"); setErr("");
+    try {
+      await onUpdate({
+        ...dosar,
+        despagubire: { ...dosar.despagubire, emailExtra: extra, savedManual: true, savedManualAt: new Date().toISOString() },
+        status: "finalizat"
+      });
+      setStatus("savedManual");
+      setTimeout(()=>setStatus(null), 3000);
+    } catch(e) { setStatus("error"); setErr(e.message); }
+  };
+
+  const done = sent || dosar.despagubire?.savedManual;
 
   return (
     <div className="space-y-3">
@@ -2513,17 +2657,42 @@ function DespagubireTab({ dosar, settings, onUpdate, isAdmin=true }) {
             <Check size={14}/> Email trimis! Dosarul a fost mutat în Finalizate.
           </div>
         )}
+        {status==="savedManual" && (
+          <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 mb-3 text-xs text-emerald-700 flex items-center gap-2">
+            <Check size={14}/> Cerere salvată fără email! Dosarul a fost mutat în Finalizate.
+          </div>
+        )}
         {sent && status !== "sent" && (
           <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-2.5 mb-3 text-xs text-emerald-700 flex items-center gap-2">
             <Check size={14}/> Mail trimis la {fmtDate(dosar.despagubire.emailSentAt)}
           </div>
         )}
+        {dosar.despagubire?.savedManual && !sent && status !== "savedManual" && (
+          <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-2.5 mb-3 text-xs text-emerald-700 flex items-center gap-2">
+            <Check size={14}/> Salvată fără email (Audatex) la {fmtDate(dosar.despagubire.savedManualAt)}
+          </div>
+        )}
         {isAdmin ? (
-          <button onClick={send} disabled={status==="sending"}
-            className="w-full py-3 rounded-xl text-sm font-semibold text-white flex items-center justify-center gap-2 disabled:opacity-60"
-            style={{background:"#0f172a"}}>
-            <Send size={14}/>{status==="sending"?"Se trimite...":"Trimite cererea de despăgubire"}
-          </button>
+          done ? (
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-500 text-center">
+              Cererea de despăgubire e finalizată. Dosarul se află la Finalizate.
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <button onClick={send} disabled={status==="sending"||status==="saving"}
+                className="w-full py-3 rounded-xl text-sm font-semibold text-white flex items-center justify-center gap-2 disabled:opacity-60"
+                style={{background:"#0f172a"}}>
+                <Send size={14}/>{status==="sending"?"Se trimite...":"Trimite cererea de despăgubire"}
+              </button>
+              <button onClick={saveWithoutEmail} disabled={status==="sending"||status==="saving"}
+                className="w-full py-3 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 border border-slate-300 text-slate-700 bg-white hover:bg-slate-50 disabled:opacity-60">
+                <Check size={14}/>{status==="saving"?"Se salvează...":"Salvează fără email (Audatex)"}
+              </button>
+              <div className="text-[10px] text-slate-400 text-center">
+                „Salvează fără email” — pentru cererile depuse prin Audatex; dosarul trece la Finalizate fără trimitere de mail.
+              </div>
+            </div>
+          )
         ) : (
           <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs text-slate-500 text-center flex items-center justify-center gap-2">
             <Lock size={12}/> Mod vizualizare — trimiterea e disponibilă doar pentru administrator
